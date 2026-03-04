@@ -14,6 +14,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install bubblewrap (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+
+      - name: Verify bubblewrap (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: command -v bwrap
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -27,3 +37,46 @@ jobs:
 
       - name: Run quality gate
         run: just ci
+
+  showcase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          command -v bwrap
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Please CLI
+        run: cargo build -p please-cli
+
+      - name: Build showcase UI and API
+        run: |
+          cd examples/showcase
+          ../../target/debug/please --workspace . run build_ui --explain
+          ../../target/debug/please --workspace . run build_api --explain
+
+      - name: Validate showcase health endpoint
+        run: |
+          cd examples/showcase
+          PORT=18080 STATIC_DIR=frontend/dist backend/target/release/showcase-server >/tmp/showcase.log 2>&1 &
+          SHOWCASE_PID=$!
+          trap 'kill ${SHOWCASE_PID} >/dev/null 2>&1 || true' EXIT
+          sleep 2
+          curl -fsS http://127.0.0.1:18080/api/health
+
+      - name: Build showcase container artifact
+        run: |
+          cd examples/showcase
+          ../../target/debug/please --workspace . run package_container --explain
+          test -f artifacts/showcase-image.tar

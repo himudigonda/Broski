@@ -1,0 +1,14 @@
+[please]
+version = "0.1"
+
+[task.process]
+inputs = ["src/input.txt"]
+outputs = ["dist/out.txt"]
+isolation = "best_effort"
+run = "mkdir -p dist && cat src/input.txt > dist/out.txt"
+
+[task.fail_midway]
+inputs = ["src/input.txt"]
+outputs = ["dist/bad.txt"]
+isolation = "best_effort"
+run = "mkdir -p dist && echo 'poison' > dist/bad.txt && exit 1"

@@ -1,0 +1,112 @@
+:root {
+  --bg: radial-gradient(circle at top, #f9f5e9, #efe6cc 48%, #e8dcc0 100%);
+  --ink: #14213d;
+  --accent: #f77f00;
+  --panel: rgba(255, 255, 255, 0.82);
+  --panel-border: rgba(20, 33, 61, 0.14);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  background: var(--bg);
+  min-height: 100vh;
+}
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 3rem;
+}
+
+.hero {
+  margin-bottom: 1.5rem;
+}
+
+.hero h1 {
+  margin: 0.2rem 0 0.5rem;
+  font-size: clamp(1.8rem, 3vw, 2.8rem);
+  letter-spacing: -0.03em;
+}
+
+.eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  letter-spacing: 0.16em;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 16px;
+  padding: 1rem;
+  box-shadow: 0 14px 28px rgba(20, 33, 61, 0.08);
+}
+
+.card-wide {
+  grid-column: span 2;
+}
+
+.card h2 {
+  margin: 0 0 0.8rem;
+  font-size: 1.1rem;
+}
+
+dl {
+  margin: 0;
+}
+
+dl div {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.35rem 0;
+  border-bottom: 1px dashed rgba(20, 33, 61, 0.2);
+}
+
+dt {
+  font-weight: 600;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.55rem 0.4rem;
+  border-bottom: 1px solid rgba(20, 33, 61, 0.12);
+}
+
+th {
+  font-size: 0.83rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.error {
+  margin-bottom: 0.8rem;
+  color: #9b2226;
+  font-weight: 600;
+}
+
+@media (max-width: 820px) {
+  .card-wide {
+    grid-column: span 1;
+  }
+}

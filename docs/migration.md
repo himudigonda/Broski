@@ -1,34 +1,37 @@
 # Migration Guide: `make` / `just` to `please`
 
-`Please` is designed as a workflow replacement, not a syntax parser for existing `Makefile`/`justfile` formats.
-The migration path is straightforward: map each command into an explicit task contract.
+`Please` replaces workflow orchestration semantics, not Make/Just file syntax.
+
+## Important
+There is intentionally **no automatic importer** in v0.2.0-beta.1.
+Manual migration keeps `inputs`/`outputs` explicit and preserves deterministic caching and ACID semantics.
 
 ## Concept mapping
 | Concept | make | just | please |
 | --- | --- | --- | --- |
-| Task definition | target rule | recipe | `[task.<name>]` |
-| Dependencies | prerequisites | recipe dependencies | `deps = [...]` |
-| Inputs | implicit, often mtime-based | implicit | `inputs = [...]` |
-| Outputs | implicit | implicit | `outputs = [...]` |
-| Command | recipe body | recipe body | `run = "..."` or `run = ["cmd", "arg"]` |
-| Rebuild skip | timestamps | none by default | content fingerprint cache |
+| Task definition | target | recipe | `[task.<name>]` |
+| Dependencies | prerequisites | dependencies | `deps = []` |
+| Inputs | implicit/mtime | implicit | `inputs = []` |
+| Outputs | implicit | implicit | `outputs = []` |
+| Command body | recipe | recipe | `run = "..."` or `run = ["cmd", "arg"]` |
+| Rebuild logic | timestamps | rerun by default | content fingerprint + cache |
 
-## Quick translation checklist
-1. Pick each existing target/recipe and name a `task.<name>`.
+## Translation checklist
+1. Create one `task.<name>` per legacy target/recipe.
 2. Move command body into `run`.
-3. Declare `deps` explicitly.
-4. Declare `inputs` as glob/file patterns that affect output.
-5. Declare `outputs` precisely.
-6. Run `please --workspace . doctor` and then `please --workspace . run <task>`.
+3. Add `deps` explicitly.
+4. Add all cache-relevant source/config patterns to `inputs`.
+5. Add concrete artifacts/stamps to `outputs`.
+6. Validate via:
+   - `please --workspace . doctor`
+   - `please --workspace . run <task> --explain`
 
 ## Example: make -> please
-`Makefile`:
 ```make
 build: src/main.rs Cargo.toml
 	cargo build --release
 ```
 
-`pleasefile`:
 ```toml
 [please]
 version = "0.1"
@@ -40,37 +43,23 @@ run = "cargo build --release"
 ```
 
 ## Example: just -> please
-`justfile`:
 ```just
-fmt:
-  cargo fmt --all --check
-
-lint: fmt
+lint:
   cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-`pleasefile`:
 ```toml
 [please]
 version = "0.1"
 
-[task.fmt]
-inputs = ["Cargo.toml", "crates/**/*.rs"]
-outputs = [".please/stamps/fmt.ok"]
-run = "mkdir -p .please/stamps && cargo fmt --all --check && printf 'ok\n' > .please/stamps/fmt.ok"
-
 [task.lint]
-deps = ["fmt"]
 inputs = ["Cargo.toml", "crates/**/*.rs"]
 outputs = [".please/stamps/lint.ok"]
-run = "mkdir -p .please/stamps && cargo clippy --workspace --all-targets --all-features -- -D warnings && printf 'ok\n' > .please/stamps/lint.ok"
+run = "mkdir -p .please/stamps && cargo clippy --workspace --all-targets --all-features -- -D warnings && printf 'ok\\n' > .please/stamps/lint.ok"
 ```
 
-## Practical notes
-- Prefer small, explicit output contracts. This improves cache correctness.
-- Keep task commands shell-portable when possible.
-- If a task mutates files outside declared `outputs`, behavior becomes non-portable and cache correctness is not guaranteed.
-
-## Non-goals in v0.1
-- No automatic conversion tool for Makefile/justfile yet.
-- No remote shared cache yet.
+## Debugging misses
+Use explain mode to identify exactly what changed:
+```bash
+please --workspace . run lint --explain
+```

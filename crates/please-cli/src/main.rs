@@ -29,6 +29,8 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
+        explain: bool,
+        #[arg(long)]
         force: bool,
         #[arg(long)]
         no_cache: bool,
@@ -110,13 +112,19 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Run { task, dry_run, force, no_cache, force_isolation, jobs } => {
+        Command::Run { task, dry_run, explain, force, no_cache, force_isolation, jobs } => {
             let config = load_and_validate(&workspace)?;
             let cache = LocalArtifactStore::new(cache_root(&workspace))?;
             let executor = Executor::new(&workspace, config, Arc::new(cache))?;
 
-            let mut options =
-                RunOptions { dry_run, force, no_cache, force_isolation, ..RunOptions::default() };
+            let mut options = RunOptions {
+                dry_run,
+                explain,
+                force,
+                no_cache,
+                force_isolation,
+                ..RunOptions::default()
+            };
             if let Some(j) = jobs {
                 options.jobs = j.max(1);
             }
@@ -131,6 +139,17 @@ fn run() -> Result<()> {
             }
             if !summary.dry_run.is_empty() {
                 println!("dry-run: {}", summary.dry_run.join(", "));
+            }
+            if options.explain {
+                for (task_name, reasons) in &summary.cache_miss_reasons {
+                    println!("explain {}:", task_name);
+                    for reason in reasons.iter().take(10) {
+                        println!("- {}", reason);
+                    }
+                    if reasons.len() > 10 {
+                        println!("- +{} more changes", reasons.len() - 10);
+                    }
+                }
             }
 
             Ok(())
@@ -275,6 +294,16 @@ mod tests {
 
         match cli.command {
             Command::Run { force_isolation, .. } => assert!(force_isolation),
+            _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_explain_flag() {
+        let cli = Cli::try_parse_from(["please", "--workspace", ".", "run", "build", "--explain"])
+            .expect("parse cli");
+        match cli.command {
+            Command::Run { explain, .. } => assert!(explain),
             _ => panic!("expected run command"),
         }
     }

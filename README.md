@@ -1,27 +1,23 @@
 # Please
 
-`Please` is a deterministic task runner for polyglot projects.
+`Please` is a deterministic task runner for polyglot projects with explicit task contracts (`inputs`, `outputs`, `deps`, `env`, `run`).
 
-## Alpha status
-`Please` is currently in **alpha**. The first public prerelease is `v0.1.0-alpha.1`.
-Use it for dogfooding and feedback. Production-hardening work is ongoing.
+## Status
+Current prerelease target: **`v0.2.0-beta.1`**.
 
-## What you get in v0.1
-- TOML `pleasefile` parsing with semantic validation.
-- DAG scheduling with deterministic topological layers.
-- Content-hash fingerprints (BLAKE3) for task invalidation.
-- Local CAS + SQLite cache metadata.
-- Staged execution with transactional output promotion.
-- Isolation policy support:
-  - Linux: strict isolation via `bwrap`.
-  - macOS: best-effort isolation (strict mode unsupported).
+## Why Please
+- Content-hash invalidation (BLAKE3), not mtime heuristics.
+- DAG-aware parallel scheduling.
+- Transactional output promotion.
+- Local CAS + SQLite execution metadata.
+- Explainable cache misses via `--explain`.
 
 ## Install
-Supported release binaries:
+Supported binaries:
 - `x86_64-unknown-linux-gnu`
 - `aarch64-apple-darwin`
 
-### Clone-and-install flow
+Clone-and-install:
 ```bash
 git clone https://github.com/himudigonda/Please.git
 cd Please
@@ -29,48 +25,66 @@ cd Please
 please --version
 ```
 
-### Curl install flow
+Curl install:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | bash
 ```
 
-Install a specific version:
+Install specific version:
 ```bash
-PLEASE_VERSION=v0.1.0-alpha.1 ./install.sh
+PLEASE_VERSION=v0.2.0-beta.1 ./install.sh
 ```
 
-Default install dir is `~/.local/bin` (`INSTALL_DIR` can override).
-
-## Usage
+## CLI quickstart
 ```bash
 please --workspace . list
 please --workspace . run ci
+please --workspace . run ci --explain
 please --workspace . graph ci --format text
 ```
 
-## Drop-in migration path
-`Please` is a workflow replacement for `make`/`just` rather than a syntax-compatible parser.
-Use the migration guide to translate existing recipes into explicit `inputs`/`outputs` task contracts:
-- [Migration guide](/Users/himudigonda/Documents/Projects/Please/docs/migration.md)
-- [Polyglot example](/Users/himudigonda/Documents/Projects/Please/examples/polyglot/pleasefile)
-- [Minimal example](/Users/himudigonda/Documents/Projects/Please/examples/minimal/pleasefile)
+## Cache explain mode
+Use `--explain` when you expect a cache hit but see execution:
+```bash
+please --workspace . run build_api --explain
+```
+Example reasons:
+- `cache miss: input changed: src/main.rs`
+- `cache miss: env changed: MODE`
+- `cache bypass: --no-cache supplied`
 
-## Contributor quick start
+## Showcase (React + Rust + Docker)
+`examples/showcase` proves end-to-end orchestration.
+
+Build and package:
+```bash
+cd examples/showcase
+../../target/debug/please --workspace . run package_container --explain
+```
+
+Run cache proof script:
+```bash
+../../target/debug/please --workspace . run prove_cache
+```
+
+See:
+- [docs/showcase.md](docs/showcase.md)
+- [examples/showcase/README.md](examples/showcase/README.md)
+
+## Migration note
+Please is a workflow replacement for `make`/`just`, not a syntax parser for their files.
+Manual-first migration is intentional to preserve deterministic contracts.
+See [docs/migration.md](docs/migration.md).
+
+## Developer quickstart
 ```bash
 just setup
 just ci
-```
-
-You can also run the same gate through Please:
-```bash
 please --workspace . run ci
 ```
 
-Contribution process and architecture notes:
-- [Contributing guide](/Users/himudigonda/Documents/Projects/Please/CONTRIBUTING.md)
-- [Architecture deep dive](/Users/himudigonda/Documents/Projects/Please/docs/architecture.md)
-- [Release runbook](/Users/himudigonda/Documents/Projects/Please/docs/release-runbook.md)
-
-## Parser mode
-- Default parser: TOML (`PLEASE_PARSER_MODE=toml`).
-- Experimental parser path: `PLEASE_PARSER_MODE=winnow`.
+## Core docs
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [docs/architecture.md](docs/architecture.md)
+- [docs/cache-telemetry.md](docs/cache-telemetry.md)
+- [docs/release-v0.2.md](docs/release-v0.2.md)

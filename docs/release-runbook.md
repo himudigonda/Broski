@@ -1,57 +1,50 @@
-# Release Runbook: v0.1.0-alpha.1
+# Release Runbook: v0.2.0-beta.1
 
 ## Scope
-This runbook covers cutting and publishing `v0.1.0-alpha.1` for `himudigonda/Please`.
+This runbook covers cutting and publishing `v0.2.0-beta.1` for `himudigonda/Please`.
 
 ## Preconditions
-- You are on `main` and the tree is clean.
-- GitHub Actions is enabled for this repository.
-- You have permission to push tags and publish releases.
+- `main` is clean and synced.
+- Required CI jobs are green (core + showcase).
+- You have permission to push tags/publish releases.
 
 ## Cut checklist
 1. Sync and verify branch state.
    - `git checkout main`
    - `git pull --ff-only`
    - `git status --short` (must be empty)
-2. Run full quality gate.
+2. Run local quality gates.
    - `just ci`
-3. Optional release pipeline dry-run.
-   - Create temporary tag: `git tag v0.0.0-test-release`
-   - Push: `git push origin v0.0.0-test-release`
-   - Verify workflow and draft release artifacts.
-   - Delete temp release and tag after validation.
-4. Create the alpha tag from `main`.
-   - `git tag -a v0.1.0-alpha.1 -m "Please v0.1.0-alpha.1"`
-   - `git push origin v0.1.0-alpha.1`
-5. Wait for `release.yml` workflow completion.
-6. Validate prerelease contents.
-   - Artifacts:
-     - `please-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz`
-     - `please-v0.1.0-alpha.1-aarch64-apple-darwin.tar.gz`
-     - `SHA256SUMS.txt`
-   - Confirm checksum file contains entries for both artifacts.
-7. Confirm prerelease visibility in GitHub UI.
+   - `please --workspace . run ci`
+3. Validate showcase proof.
+   - `cd examples/showcase`
+   - `../../target/debug/please --workspace . run package_container --explain`
+4. Optional release dry-run.
+   - `git tag v0.0.0-test-release`
+   - `git push origin v0.0.0-test-release`
+   - inspect release workflow and artifacts, then remove temp tag.
+5. Tag beta release from `main`.
+   - `git tag -a v0.2.0-beta.1 -m "Please v0.2.0-beta.1"`
+   - `git push origin v0.2.0-beta.1`
+6. Wait for `release.yml` completion.
+7. Validate prerelease artifacts:
+   - `please-v0.2.0-beta.1-x86_64-unknown-linux-gnu.tar.gz`
+   - `please-v0.2.0-beta.1-aarch64-apple-darwin.tar.gz`
+   - `SHA256SUMS.txt`
 
 ## Post-publish validation
-1. Install from published release with installer script.
-2. Verify binary reports version:
+1. Install check:
+   - `PLEASE_VERSION=v0.2.0-beta.1 ./install.sh`
    - `please --version`
-3. Run smoke commands in a sample project:
-   - `please list`
-   - `please run ci`
+2. Functional check:
+   - `please --workspace . run ci --explain`
+3. Showcase smoke:
+   - `examples/showcase` build/package tasks.
 
-## Rollback / Yank procedure
-1. In GitHub Releases, delete the prerelease.
+## Rollback / Yank
+1. Delete prerelease in GitHub.
 2. Delete remote tag:
-   - `git push origin :refs/tags/v0.1.0-alpha.1`
+   - `git push origin :refs/tags/v0.2.0-beta.1`
 3. Delete local tag:
-   - `git tag -d v0.1.0-alpha.1`
-4. Communicate rollback reason in issue/PR notes.
-
-## Hotfix alpha (`v0.1.0-alpha.2`)
-1. Land fix commits on `main` with green `just ci`.
-2. Tag new prerelease:
-   - `git tag -a v0.1.0-alpha.2 -m "Please v0.1.0-alpha.2"`
-   - `git push origin v0.1.0-alpha.2`
-3. Confirm new prerelease after artifact validation.
-4. Keep `v0.1.0-alpha.1` notes for historical traceability.
+   - `git tag -d v0.2.0-beta.1`
+4. Ship follow-up prerelease (`v0.2.0-beta.2`) after fixes.

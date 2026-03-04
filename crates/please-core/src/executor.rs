@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io;
@@ -28,6 +29,7 @@ pub struct RunOptions {
     pub dry_run: bool,
     pub force: bool,
     pub no_cache: bool,
+    pub explain: bool,
     pub force_isolation: bool,
     pub jobs: usize,
 }
@@ -38,6 +40,7 @@ impl Default for RunOptions {
             dry_run: false,
             force: false,
             no_cache: false,
+            explain: false,
             force_isolation: false,
             jobs: num_cpus::get().max(1),
         }
@@ -49,6 +52,7 @@ pub struct RunSummary {
     pub executed: Vec<String>,
     pub cache_hits: Vec<String>,
     pub dry_run: Vec<String>,
+    pub cache_miss_reasons: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +60,7 @@ struct TaskOutcome {
     task_name: String,
     from_cache: bool,
     dry_run: bool,
+    cache_miss_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -151,12 +156,16 @@ impl Executor {
                         return Err(error);
                     }
                 };
+                let task_name = outcome.task_name.clone();
                 if outcome.dry_run {
-                    summary.dry_run.push(outcome.task_name);
+                    summary.dry_run.push(task_name.clone());
                 } else if outcome.from_cache {
-                    summary.cache_hits.push(outcome.task_name);
+                    summary.cache_hits.push(task_name.clone());
                 } else {
-                    summary.executed.push(outcome.task_name);
+                    summary.executed.push(task_name.clone());
+                }
+                if !outcome.cache_miss_reasons.is_empty() {
+                    summary.cache_miss_reasons.insert(task_name, outcome.cache_miss_reasons);
                 }
             }
         }
@@ -184,10 +193,14 @@ impl Executor {
 
         let outputs = normalize_outputs(task)?;
         let inputs = resolve_inputs(&self.workspace_root, &task.inputs)?;
-        let fingerprint = compute_fingerprint(&self.workspace_root, task_name, task, &inputs)?;
+        let fingerprint_result =
+            compute_fingerprint(&self.workspace_root, task_name, task, &inputs)?;
+        let mut cache_miss_reasons = Vec::new();
 
         if !options.force && !options.no_cache {
-            if let Some(record) = self.store.fetch_execution(task_name, &fingerprint.0)? {
+            if let Some(record) =
+                self.store.fetch_execution(task_name, &fingerprint_result.fingerprint.0)?
+            {
                 if options.dry_run {
                     emit_progress(
                         &progress,
@@ -200,6 +213,7 @@ impl Executor {
                         task_name: task_name.to_string(),
                         from_cache: true,
                         dry_run: true,
+                        cache_miss_reasons: Vec::new(),
                     });
                 }
 
@@ -218,8 +232,14 @@ impl Executor {
                     task_name: task_name.to_string(),
                     from_cache: true,
                     dry_run: false,
+                    cache_miss_reasons: Vec::new(),
                 });
             }
+        }
+
+        if options.explain {
+            cache_miss_reasons =
+                self.explain_cache_miss(task_name, options, &fingerprint_result.manifest)?;
         }
 
         if options.dry_run {
@@ -231,6 +251,7 @@ impl Executor {
                 task_name: task_name.to_string(),
                 from_cache: false,
                 dry_run: true,
+                cache_miss_reasons,
             });
         }
 
@@ -262,7 +283,8 @@ impl Executor {
             let artifacts = self.store.store_artifacts(&self.workspace_root, &outputs)?;
             let record = ExecutionRecord {
                 task_name: task_name.to_string(),
-                fingerprint: fingerprint.0,
+                fingerprint: fingerprint_result.fingerprint.0,
+                manifest: fingerprint_result.manifest,
                 artifacts,
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -275,7 +297,36 @@ impl Executor {
             &progress,
             ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Executed),
         );
-        Ok(TaskOutcome { task_name: task_name.to_string(), from_cache: false, dry_run: false })
+        Ok(TaskOutcome {
+            task_name: task_name.to_string(),
+            from_cache: false,
+            dry_run: false,
+            cache_miss_reasons,
+        })
+    }
+
+    fn explain_cache_miss(
+        &self,
+        task_name: &str,
+        options: &RunOptions,
+        current_manifest: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>> {
+        if options.force {
+            return Ok(vec!["cache bypass: --force supplied".to_string()]);
+        }
+        if options.no_cache {
+            return Ok(vec!["cache bypass: --no-cache supplied".to_string()]);
+        }
+
+        let Some(previous) = self.store.fetch_latest_execution(task_name)? else {
+            return Ok(vec!["cache miss: no prior execution record".to_string()]);
+        };
+
+        let mut reasons = explain_manifest_delta(&previous.manifest, current_manifest);
+        if reasons.is_empty() {
+            reasons.push("cache miss: fingerprint changed".to_string());
+        }
+        Ok(reasons)
     }
 
     fn create_stage_snapshot(&self, task_name: &str) -> Result<TempDir> {
@@ -664,6 +715,53 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn explain_manifest_delta(
+    previous: &BTreeMap<String, String>,
+    current: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut keys = BTreeSet::new();
+    keys.extend(previous.keys().cloned());
+    keys.extend(current.keys().cloned());
+
+    let mut reasons = Vec::new();
+    for key in keys {
+        match (previous.get(&key), current.get(&key)) {
+            (Some(old), Some(new)) if old != new => {
+                reasons.push(describe_manifest_change("changed", &key))
+            }
+            (None, Some(_)) => reasons.push(describe_manifest_change("added", &key)),
+            (Some(_), None) => reasons.push(describe_manifest_change("removed", &key)),
+            _ => {}
+        }
+    }
+    reasons
+}
+
+fn describe_manifest_change(action: &str, key: &str) -> String {
+    if let Some(path) = key.strip_prefix("input:") {
+        return format!("cache miss: input {action}: {path}");
+    }
+    if let Some(name) = key.strip_prefix("env:") {
+        return format!("cache miss: env {action}: {name}");
+    }
+    if let Some(pattern) = key.strip_prefix("input_pattern:") {
+        return format!("cache miss: input pattern {action}: {pattern}");
+    }
+    if let Some(output) = key.strip_prefix("output:") {
+        return format!("cache miss: output contract {action}: {output}");
+    }
+    if key == "task:run" {
+        return format!("cache miss: task command {action}");
+    }
+    if key == "task:isolation" {
+        return format!("cache miss: isolation mode {action}");
+    }
+    if key.starts_with("task:name:") {
+        return format!("cache miss: task identity {action}");
+    }
+    format!("cache miss: {key} {action}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +860,63 @@ mod tests {
             hasher.update(&buffer[..count]);
         }
         Ok(hasher.finalize().to_hex().to_string())
+    }
+
+    #[test]
+    fn explain_manifest_delta_reports_changes() {
+        let previous = BTreeMap::from([
+            ("input:src/input.txt".to_string(), "a".to_string()),
+            ("env:MODE".to_string(), "a".to_string()),
+        ]);
+        let current = BTreeMap::from([
+            ("input:src/input.txt".to_string(), "b".to_string()),
+            ("env:MODE".to_string(), "a".to_string()),
+            ("output:dist/out.txt".to_string(), "x".to_string()),
+        ]);
+
+        let reasons = explain_manifest_delta(&previous, &current);
+        assert!(reasons.iter().any(|r| r.contains("input changed: src/input.txt")));
+        assert!(reasons.iter().any(|r| r.contains("output contract added: dist/out.txt")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_isolation_executes_when_bwrap_available() {
+        if which::which("bwrap").is_err() {
+            eprintln!("skipping strict isolation test because bwrap is unavailable");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::write(workspace.join("src/input.txt"), "hello").expect("write input");
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "build".to_string(),
+            TaskSpec {
+                deps: vec![],
+                inputs: vec!["src/input.txt".to_string()],
+                outputs: vec!["dist/output.txt".to_string()],
+                env: BTreeMap::new(),
+                run: RunSpec::Shell(
+                    "mkdir -p dist && cp src/input.txt dist/output.txt".to_string(),
+                ),
+                isolation: Some(IsolationMode::Strict),
+            },
+        );
+
+        let config =
+            PleaseFile { please: PleaseSection { version: "0.1".to_string() }, task: tasks };
+        let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
+
+        let result = executor.run_target("build", &RunOptions::default());
+        assert!(result.is_ok());
+        let output =
+            fs::read_to_string(workspace.join("dist/output.txt")).expect("read output content");
+        assert_eq!(output, "hello");
     }
 
     #[cfg(not(target_os = "linux"))]

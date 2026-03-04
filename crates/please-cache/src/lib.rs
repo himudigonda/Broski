@@ -42,15 +42,19 @@ impl LocalArtifactStore {
             CREATE TABLE IF NOT EXISTS executions (
                 task_name TEXT NOT NULL,
                 fingerprint TEXT NOT NULL,
+                manifest_json TEXT NOT NULL DEFAULT '{}',
                 artifacts_json TEXT NOT NULL,
                 stdout TEXT NOT NULL,
                 stderr TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY(task_name, fingerprint)
             );
+            CREATE INDEX IF NOT EXISTS idx_executions_task_created_at
+            ON executions(task_name, created_at DESC);
             ",
         )
         .context("initializing sqlite schema")?;
+        ensure_manifest_column(&conn)?;
         Ok(())
     }
 
@@ -69,7 +73,7 @@ impl ArtifactStore for LocalArtifactStore {
         let conn = self.connection()?;
         let mut stmt = conn
             .prepare(
-                "SELECT artifacts_json, stdout, stderr, created_at
+                "SELECT manifest_json, artifacts_json, stdout, stderr, created_at
                 FROM executions WHERE task_name = ?1 AND fingerprint = ?2",
             )
             .context("preparing select execution statement")?;
@@ -78,15 +82,58 @@ impl ArtifactStore for LocalArtifactStore {
             stmt.query(params![task_name, fingerprint]).context("querying execution record")?;
 
         if let Some(row) = rows.next().context("reading execution row")? {
-            let artifacts_json: String = row.get(0).context("reading artifacts_json")?;
+            let manifest_json: String = row.get(0).context("reading manifest_json")?;
+            let manifest: BTreeMap<String, String> =
+                serde_json::from_str(&manifest_json).context("deserializing manifest_json")?;
+            let artifacts_json: String = row.get(1).context("reading artifacts_json")?;
             let artifacts: Vec<CachedArtifact> =
                 serde_json::from_str(&artifacts_json).context("deserializing artifacts_json")?;
-            let stdout: String = row.get(1).context("reading stdout")?;
-            let stderr: String = row.get(2).context("reading stderr")?;
-            let created_at: i64 = row.get(3).context("reading created_at")?;
+            let stdout: String = row.get(2).context("reading stdout")?;
+            let stderr: String = row.get(3).context("reading stderr")?;
+            let created_at: i64 = row.get(4).context("reading created_at")?;
             Ok(Some(ExecutionRecord {
                 task_name: task_name.to_owned(),
                 fingerprint: fingerprint.to_owned(),
+                manifest,
+                artifacts,
+                stdout,
+                stderr,
+                created_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn fetch_latest_execution(&self, task_name: &str) -> Result<Option<ExecutionRecord>> {
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT fingerprint, manifest_json, artifacts_json, stdout, stderr, created_at
+                 FROM executions WHERE task_name = ?1
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .context("preparing select latest execution statement")?;
+
+        let mut rows =
+            stmt.query(params![task_name]).context("querying latest execution record")?;
+
+        if let Some(row) = rows.next().context("reading latest execution row")? {
+            let fingerprint: String = row.get(0).context("reading latest fingerprint")?;
+            let manifest_json: String = row.get(1).context("reading latest manifest_json")?;
+            let manifest: BTreeMap<String, String> = serde_json::from_str(&manifest_json)
+                .context("deserializing latest manifest_json")?;
+            let artifacts_json: String = row.get(2).context("reading latest artifacts_json")?;
+            let artifacts: Vec<CachedArtifact> = serde_json::from_str(&artifacts_json)
+                .context("deserializing latest artifacts_json")?;
+            let stdout: String = row.get(3).context("reading latest stdout")?;
+            let stderr: String = row.get(4).context("reading latest stderr")?;
+            let created_at: i64 = row.get(5).context("reading latest created_at")?;
+
+            Ok(Some(ExecutionRecord {
+                task_name: task_name.to_owned(),
+                fingerprint,
+                manifest,
                 artifacts,
                 stdout,
                 stderr,
@@ -99,15 +146,18 @@ impl ArtifactStore for LocalArtifactStore {
 
     fn save_execution(&self, record: &ExecutionRecord) -> Result<()> {
         let conn = self.connection()?;
+        let manifest_json = serde_json::to_string(&record.manifest)
+            .context("serializing manifest json for sqlite")?;
         let artifacts_json = serde_json::to_string(&record.artifacts)
             .context("serializing artifacts json for sqlite")?;
         conn.execute(
             "INSERT OR REPLACE INTO executions
-            (task_name, fingerprint, artifacts_json, stdout, stderr, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (task_name, fingerprint, manifest_json, artifacts_json, stdout, stderr, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 record.task_name,
                 record.fingerprint,
+                manifest_json,
                 artifacts_json,
                 record.stdout,
                 record.stderr,
@@ -355,9 +405,32 @@ fn dir_size(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
+fn ensure_manifest_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(executions)").context("preparing table info")?;
+    let mut rows = stmt.query([]).context("querying table info")?;
+    let mut has_manifest = false;
+    while let Some(row) = rows.next().context("reading table info row")? {
+        let column_name: String = row.get(1).context("reading table info column name")?;
+        if column_name == "manifest_json" {
+            has_manifest = true;
+            break;
+        }
+    }
+
+    if !has_manifest {
+        conn.execute(
+            "ALTER TABLE executions ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )
+        .context("adding manifest_json column")?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use std::io::Write;
 
     #[test]
@@ -402,6 +475,7 @@ mod tests {
         let existing = ExecutionRecord {
             task_name: "build".to_string(),
             fingerprint: "fp-1".to_string(),
+            manifest: BTreeMap::new(),
             artifacts: vec![],
             stdout: "".to_string(),
             stderr: "".to_string(),
@@ -411,5 +485,77 @@ mod tests {
 
         let record = store.fetch_execution("build", "fp-2").expect("fetch mismatched fingerprint");
         assert!(record.is_none());
+    }
+
+    #[test]
+    fn fetch_latest_execution_returns_most_recent_by_timestamp() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("create store");
+
+        let first = ExecutionRecord {
+            task_name: "build".to_string(),
+            fingerprint: "fp-1".to_string(),
+            manifest: BTreeMap::from([("task:run".to_string(), "old".to_string())]),
+            artifacts: vec![],
+            stdout: "old".to_string(),
+            stderr: "".to_string(),
+            created_at: 10,
+        };
+        let second = ExecutionRecord {
+            task_name: "build".to_string(),
+            fingerprint: "fp-2".to_string(),
+            manifest: BTreeMap::from([("task:run".to_string(), "new".to_string())]),
+            artifacts: vec![],
+            stdout: "new".to_string(),
+            stderr: "".to_string(),
+            created_at: 20,
+        };
+
+        store.save_execution(&first).expect("save first execution");
+        store.save_execution(&second).expect("save second execution");
+
+        let latest = store.fetch_latest_execution("build").expect("fetch latest execution");
+        let latest = latest.expect("expected latest execution");
+        assert_eq!(latest.fingerprint, "fp-2");
+        assert_eq!(latest.stdout, "new");
+        assert_eq!(latest.manifest.get("task:run"), Some(&"new".to_string()));
+    }
+
+    #[test]
+    fn migrates_old_schema_with_missing_manifest_column() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let cache_root = tmp.path().join("cache");
+        fs::create_dir_all(&cache_root).expect("create cache root");
+        let db_path = cache_root.join("metadata.sqlite3");
+        let conn = Connection::open(&db_path).expect("open sqlite");
+        conn.execute_batch(
+            "
+            CREATE TABLE executions (
+                task_name TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                artifacts_json TEXT NOT NULL,
+                stdout TEXT NOT NULL,
+                stderr TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(task_name, fingerprint)
+            );",
+        )
+        .expect("create old schema");
+
+        let old_artifacts = serde_json::to_string(&Vec::<CachedArtifact>::new()).expect("json");
+        conn.execute(
+            "INSERT INTO executions (task_name, fingerprint, artifacts_json, stdout, stderr, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params!["build", "fp-old", old_artifacts, "", "", 5i64],
+        )
+        .expect("insert old row");
+        drop(conn);
+
+        let store = LocalArtifactStore::new(&cache_root).expect("reopen store with migration");
+        let fetched = store
+            .fetch_execution("build", "fp-old")
+            .expect("fetch migrated row")
+            .expect("row exists");
+        assert!(fetched.manifest.is_empty());
     }
 }

@@ -11,72 +11,83 @@ use crate::model::TaskSpec;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskFingerprint(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FingerprintResult {
+    pub fingerprint: TaskFingerprint,
+    pub manifest: BTreeMap<String, String>,
+}
+
 pub fn compute_fingerprint(
     workspace_root: &Path,
     task_name: &str,
     task: &TaskSpec,
     resolved_inputs: &[PathBuf],
-) -> Result<TaskFingerprint> {
-    let mut hasher = blake3::Hasher::new();
+) -> Result<FingerprintResult> {
+    let mut manifest = BTreeMap::new();
 
-    hasher.update(b"please-v0.1");
-    hasher.update(task_name.as_bytes());
-    hasher.update(task.run_as_shell().as_bytes());
-    hasher.update(format!("isolation={:?}", task.effective_isolation()).as_bytes());
+    manifest.insert("meta:please_version".to_string(), digest_value(env!("CARGO_PKG_VERSION")));
+    manifest.insert(format!("task:name:{task_name}"), digest_value(task_name));
+    manifest.insert("task:run".to_string(), digest_value(&task.run_as_shell()));
+    manifest.insert(
+        "task:isolation".to_string(),
+        digest_value(&format!("{:?}", task.effective_isolation())),
+    );
 
-    for pattern in &task.inputs {
-        hasher.update(b"pattern:");
-        hasher.update(pattern.as_bytes());
+    for (idx, pattern) in task.inputs.iter().enumerate() {
+        manifest.insert(format!("input_pattern:{idx}:{pattern}"), digest_value(pattern));
     }
 
-    let sorted_env: BTreeMap<_, _> = task.env.iter().collect();
-    for (key, value) in sorted_env {
-        hasher.update(b"env:");
-        hasher.update(key.as_bytes());
-        hasher.update(b"=");
-        hasher.update(value.as_bytes());
+    for (key, value) in &task.env {
+        manifest.insert(format!("env:{key}"), digest_value(value));
     }
 
     for input in resolved_inputs {
-        hasher.update(b"input:");
-        hasher.update(input.to_string_lossy().as_bytes());
-
         let absolute = workspace_root.join(input);
+        let entry_key = format!("input:{}", input.to_string_lossy());
         if absolute.exists() {
-            hash_path(&absolute, &mut hasher)
+            let digest = hash_path(&absolute)
                 .with_context(|| format!("hashing input '{}'", absolute.display()))?;
+            manifest.insert(entry_key, digest);
         } else {
-            hasher.update(b"missing");
+            manifest.insert(entry_key, digest_value("missing"));
         }
     }
 
     for output in &task.outputs {
-        hasher.update(b"output:");
-        hasher.update(output.as_bytes());
+        manifest.insert(format!("output:{output}"), digest_value(output));
     }
 
-    Ok(TaskFingerprint(hasher.finalize().to_hex().to_string()))
+    let mut aggregate = blake3::Hasher::new();
+    aggregate.update(b"please-manifest-v1");
+    for (key, value) in &manifest {
+        aggregate.update(key.as_bytes());
+        aggregate.update(b"=");
+        aggregate.update(value.as_bytes());
+        aggregate.update(b"\n");
+    }
+
+    Ok(FingerprintResult {
+        fingerprint: TaskFingerprint(aggregate.finalize().to_hex().to_string()),
+        manifest,
+    })
 }
 
-fn hash_path(path: &Path, hasher: &mut blake3::Hasher) -> Result<()> {
+fn digest_value(value: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(value.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn hash_path(path: &Path) -> Result<String> {
     if path.is_file() {
+        let mut hasher = blake3::Hasher::new();
         hasher.update(b"file");
-        let mut file = fs::File::open(path)
-            .with_context(|| format!("opening file '{}' for hashing", path.display()))?;
-        let mut buffer = [0u8; 16 * 1024];
-        loop {
-            let count = file
-                .read(&mut buffer)
-                .with_context(|| format!("reading file '{}' for hashing", path.display()))?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-        }
-        return Ok(());
+        hash_file_into(path, &mut hasher)?;
+        return Ok(hasher.finalize().to_hex().to_string());
     }
 
     if path.is_dir() {
+        let mut hasher = blake3::Hasher::new();
         hasher.update(b"dir");
 
         let mut children = Vec::new();
@@ -96,21 +107,29 @@ fn hash_path(path: &Path, hasher: &mut blake3::Hasher) -> Result<()> {
 
         for (rel, child) in children {
             hasher.update(rel.to_string_lossy().as_bytes());
-            let mut file = fs::File::open(&child)
-                .with_context(|| format!("opening file '{}' for hashing", child.display()))?;
-            let mut buffer = [0u8; 16 * 1024];
-            loop {
-                let count = file
-                    .read(&mut buffer)
-                    .with_context(|| format!("reading file '{}' for hashing", child.display()))?;
-                if count == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..count]);
-            }
+            hasher.update(b"\0");
+            hash_file_into(&child, &mut hasher)?;
         }
+
+        return Ok(hasher.finalize().to_hex().to_string());
     }
 
+    Ok(digest_value("missing"))
+}
+
+fn hash_file_into(path: &Path, hasher: &mut blake3::Hasher) -> Result<()> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("opening file '{}' for hashing", path.display()))?;
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .with_context(|| format!("reading file '{}' for hashing", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
     Ok(())
 }
 
@@ -121,12 +140,39 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Write;
 
+    fn base_task() -> TaskSpec {
+        TaskSpec {
+            deps: vec![],
+            inputs: vec!["src/main.rs".to_string()],
+            outputs: vec!["dist/out".to_string()],
+            env: BTreeMap::new(),
+            run: RunSpec::Shell("echo hi".to_string()),
+            isolation: None,
+        }
+    }
+
+    #[test]
+    fn fingerprint_and_manifest_are_deterministic() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(src.join("main.rs"), "fn main() {}\n").expect("write main.rs");
+
+        let task = base_task();
+        let resolved = vec![PathBuf::from("src/main.rs")];
+
+        let first = compute_fingerprint(temp.path(), "build", &task, &resolved).expect("first");
+        let second = compute_fingerprint(temp.path(), "build", &task, &resolved).expect("second");
+
+        assert_eq!(first, second);
+    }
+
     #[test]
     fn fingerprint_changes_when_env_changes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let src = temp.path().join("src");
-        std::fs::create_dir_all(&src).expect("create src");
-        let mut f = std::fs::File::create(src.join("main.rs")).expect("create main.rs");
+        fs::create_dir_all(&src).expect("create src");
+        let mut f = fs::File::create(src.join("main.rs")).expect("create main.rs");
         f.write_all(b"fn main() {} ").expect("write main.rs");
 
         let mut env_a = BTreeMap::new();
@@ -135,16 +181,8 @@ mod tests {
         let mut env_b = BTreeMap::new();
         env_b.insert("MODE".to_string(), "b".to_string());
 
-        let task_a = TaskSpec {
-            deps: vec![],
-            inputs: vec!["src/main.rs".to_string()],
-            outputs: vec!["dist/out".to_string()],
-            env: env_a,
-            run: RunSpec::Shell("echo hi".to_string()),
-            isolation: None,
-        };
-
-        let task_b = TaskSpec { env: env_b, ..task_a.clone() };
+        let task_a = TaskSpec { env: env_a, ..base_task() };
+        let task_b = TaskSpec { env: env_b, ..base_task() };
 
         let resolved = vec![PathBuf::from("src/main.rs")];
 
@@ -153,6 +191,49 @@ mod tests {
         let fp_b =
             compute_fingerprint(temp.path(), "build", &task_b, &resolved).expect("fingerprint b");
 
-        assert_ne!(fp_a, fp_b);
+        assert_ne!(fp_a.fingerprint, fp_b.fingerprint);
+        assert_ne!(fp_a.manifest.get("env:MODE"), fp_b.manifest.get("env:MODE"));
+    }
+
+    #[test]
+    fn missing_input_encoding_is_stable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let task = TaskSpec {
+            deps: vec![],
+            inputs: vec!["src/missing.txt".to_string()],
+            outputs: vec!["dist/out".to_string()],
+            env: BTreeMap::new(),
+            run: RunSpec::Shell("echo hi".to_string()),
+            isolation: None,
+        };
+        let resolved = vec![PathBuf::from("src/missing.txt")];
+
+        let fp = compute_fingerprint(temp.path(), "build", &task, &resolved).expect("fingerprint");
+        assert!(fp.manifest.contains_key("input:src/missing.txt"));
+        assert!(!fp.fingerprint.0.is_empty());
+    }
+
+    #[test]
+    fn directory_hash_order_is_stable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        fs::create_dir_all(root.join("src/nested")).expect("create nested");
+        fs::write(root.join("src/nested/b.txt"), "b").expect("write b");
+        fs::write(root.join("src/a.txt"), "a").expect("write a");
+
+        let task = TaskSpec {
+            deps: vec![],
+            inputs: vec!["src".to_string()],
+            outputs: vec!["dist/out".to_string()],
+            env: BTreeMap::new(),
+            run: RunSpec::Shell("echo hi".to_string()),
+            isolation: None,
+        };
+
+        let resolved = vec![PathBuf::from("src")];
+        let first = compute_fingerprint(root, "build", &task, &resolved).expect("first");
+        let second = compute_fingerprint(root, "build", &task, &resolved).expect("second");
+        assert_eq!(first.fingerprint, second.fingerprint);
+        assert_eq!(first.manifest.get("input:src"), second.manifest.get("input:src"));
     }
 }
