@@ -15,3 +15,6 @@ which.workspace = true
 please-cache = { path = "../please-cache" }
 please-core = { path = "../please-core" }
 please-store = { path = "../please-store" }
+
+[dev-dependencies]
+tempfile.workspace = true

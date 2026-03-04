@@ -5,7 +5,8 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use please_cache::LocalArtifactStore;
 use please_core::{
-    load_pleasefile, validate_pleasefile, Executor, IsolationMode, RunOptions, TaskGraph,
+    load_pleasefile, sweep_runtime_state, validate_pleasefile, Executor, IsolationMode, RunOptions,
+    TaskGraph,
 };
 use please_store::ArtifactStore;
 
@@ -38,7 +39,12 @@ enum Command {
         #[arg(long, value_enum, default_value = "text")]
         format: GraphFormat,
     },
-    Doctor,
+    Doctor {
+        #[arg(long, conflicts_with = "no_repair")]
+        repair: bool,
+        #[arg(long = "no-repair")]
+        no_repair: bool,
+    },
     Cache {
         #[command(subcommand)]
         command: CacheCommand,
@@ -74,7 +80,7 @@ fn run() -> Result<()> {
         .or_else(|_| Ok::<PathBuf, anyhow::Error>(cli.workspace.clone()))?;
 
     match cli.command {
-        Command::Doctor => run_doctor(&workspace),
+        Command::Doctor { repair, no_repair } => run_doctor(&workspace, repair || !no_repair),
         Command::Cache { command } => run_cache_command(&workspace, command),
         Command::List => {
             let config = load_and_validate(&workspace)?;
@@ -135,12 +141,19 @@ fn load_and_validate(workspace: &Path) -> Result<please_core::PleaseFile> {
     Ok(config)
 }
 
-fn run_doctor(workspace: &Path) -> Result<()> {
+fn run_doctor(workspace: &Path, repair: bool) -> Result<()> {
     let config = load_pleasefile(workspace).with_context(|| {
         format!("loading pleasefile at '{}'", workspace.join("pleasefile").display())
     })?;
 
     validate_pleasefile(&config, workspace)?;
+
+    let sweep = sweep_runtime_state(workspace, repair)?;
+    if sweep.active_lock_detected {
+        return Err(anyhow!(
+            "another Please execution is active; cannot run doctor sweep while lock is live"
+        ));
+    }
 
     let mut strict_tasks = Vec::new();
     for (name, task) in &config.task {
@@ -156,6 +169,17 @@ fn run_doctor(workspace: &Path) -> Result<()> {
     println!("doctor: ok");
     println!("workspace: {}", workspace.display());
     println!("tasks: {}", config.task.len());
+    println!("repair mode: {}", if repair { "enabled" } else { "disabled" });
+    if sweep.stale_lock_detected {
+        println!(
+            "runtime lock: stale detected (removed: {})",
+            if sweep.stale_lock_removed { "yes" } else { "no" }
+        );
+    }
+    println!(
+        "sweep cleanup: stage={} tx={}",
+        sweep.stage_entries_removed, sweep.tx_entries_removed
+    );
     if strict_tasks.is_empty() {
         println!("isolation: no strict tasks declared");
     } else {
@@ -183,4 +207,36 @@ fn run_cache_command(workspace: &Path, command: CacheCommand) -> Result<()> {
 
 fn cache_root(workspace: &Path) -> PathBuf {
     workspace.join(".please/cache")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn doctor_repairs_orphaned_tx_entries() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let workspace = temp.path();
+
+        fs::write(
+            workspace.join("pleasefile"),
+            r#"
+                [please]
+                version = "0.1"
+
+                [task.example]
+                inputs = ["src/input.txt"]
+                outputs = ["dist/out.txt"]
+                run = "echo test > dist/out.txt"
+            "#,
+        )
+        .expect("write pleasefile");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::write(workspace.join("src/input.txt"), "x").expect("write input");
+        fs::create_dir_all(workspace.join(".please/tx/orphan")).expect("create orphan tx");
+
+        run_doctor(workspace, true).expect("doctor should succeed");
+        assert!(!workspace.join(".please/tx/orphan").exists());
+    }
 }

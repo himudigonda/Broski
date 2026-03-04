@@ -14,6 +14,7 @@ petgraph.workspace = true
 rayon.workspace = true
 reflink-copy.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 shell-words.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
@@ -25,7 +26,6 @@ please-store = { path = "../please-store" }
 
 [dev-dependencies]
 criterion = "0.5"
-serde_json.workspace = true
 tempfile.workspace = true
 
 [[bench]]

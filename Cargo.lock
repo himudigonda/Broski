@@ -600,6 +600,7 @@ dependencies = [
  "please-cache",
  "please-core",
  "please-store",
+ "tempfile",
  "which",
 ]
 

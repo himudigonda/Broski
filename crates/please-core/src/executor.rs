@@ -16,6 +16,7 @@ use crate::fingerprint::compute_fingerprint;
 use crate::graph::TaskGraph;
 use crate::model::{IsolationMode, PleaseFile, TaskSpec};
 use crate::resolver::{normalize_relative_path, resolve_inputs};
+use crate::runtime::{acquire_runtime_lock, sweep_runtime_state, RuntimeLockGuard};
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -45,12 +46,12 @@ struct TaskOutcome {
     dry_run: bool,
 }
 
-#[derive(Clone)]
 pub struct Executor {
     workspace_root: PathBuf,
     config: PleaseFile,
     graph: TaskGraph,
     store: Arc<dyn ArtifactStore>,
+    _lock_guard: RuntimeLockGuard,
 }
 
 impl Executor {
@@ -59,9 +60,15 @@ impl Executor {
         config: PleaseFile,
         store: Arc<dyn ArtifactStore>,
     ) -> Result<Self> {
+        let workspace_root = workspace_root.as_ref().to_path_buf();
+        let sweep = sweep_runtime_state(&workspace_root, true)?;
+        if sweep.active_lock_detected {
+            return Err(anyhow!("another Please execution is active; aborting startup sweep"));
+        }
+        let lock_guard = acquire_runtime_lock(&workspace_root)?;
         let graph = TaskGraph::build(&config.task)?;
 
-        Ok(Self { workspace_root: workspace_root.as_ref().to_path_buf(), config, graph, store })
+        Ok(Self { workspace_root, config, graph, store, _lock_guard: lock_guard })
     }
 
     pub fn graph(&self) -> &TaskGraph {
