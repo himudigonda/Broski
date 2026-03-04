@@ -666,6 +666,7 @@ dependencies = [
  "toml",
  "walkdir",
  "which",
+ "winnow",
 ]
 
 [[package]]
