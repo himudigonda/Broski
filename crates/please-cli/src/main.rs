@@ -317,7 +317,7 @@ mod tests {
             workspace.join("pleasefile"),
             r#"
                 [please]
-                version = "0.1"
+                version = "0.2"
 
                 [task.example]
                 inputs = ["src/input.txt"]

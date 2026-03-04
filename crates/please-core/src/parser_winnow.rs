@@ -183,7 +183,7 @@ mod tests {
     fn parses_basic_document() {
         let input = r#"
             [please]
-            version = "0.1"
+            version = "0.2"
 
             [task.build]
             deps = ["prep"]
@@ -194,7 +194,7 @@ mod tests {
         "#;
 
         let parsed = parse_pleasefile_winnow(input).expect("parse with winnow");
-        assert_eq!(parsed.please.version, "0.1");
+        assert_eq!(parsed.please.version, "0.2");
         assert!(parsed.task.contains_key("build"));
     }
 
@@ -202,7 +202,7 @@ mod tests {
     fn parses_multiline_run_block() {
         let input = r#"
             [please]
-            version = "0.1"
+            version = "0.2"
 
             [task.echo]
             inputs = ["src/main.rs"]

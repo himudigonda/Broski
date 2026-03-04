@@ -7,9 +7,9 @@ use crate::model::PleaseFile;
 use crate::resolver::normalize_relative_path;
 
 pub fn validate_pleasefile(config: &PleaseFile, workspace_root: &Path) -> Result<()> {
-    if config.please.version != "0.1" {
+    if config.please.version != "0.1" && config.please.version != "0.2" {
         return Err(anyhow!(
-            "unsupported pleasefile version '{}'; expected '0.1'",
+            "unsupported pleasefile version '{}'; expected '0.1' or '0.2'",
             config.please.version
         ));
     }
@@ -92,7 +92,7 @@ mod tests {
         tasks.insert("build".to_string(), task);
 
         let config =
-            PleaseFile { please: PleaseSection { version: "0.1".to_string() }, task: tasks };
+            PleaseFile { please: PleaseSection { version: "0.2".to_string() }, task: tasks };
 
         let result = validate_pleasefile(&config, Path::new("."));
         assert!(result.is_err());

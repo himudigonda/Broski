@@ -13,6 +13,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install bubblewrap (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -29,19 +30,29 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
 
-      - name: Install Just and Rust tooling
-        run: |
-          cargo install --locked just
-          cargo install --locked cargo-nextest
-          cargo install --locked cargo-llvm-cov
+      - name: Install just
+        uses: taiki-e/install-action@just
 
-      - name: Run quality gate
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+
+      - name: Install cargo-llvm-cov
+        if: matrix.os == 'ubuntu-latest'
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run quality gate (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: just ci
+
+      - name: Run quality gate (macOS fast path)
+        if: matrix.os == 'macos-latest'
+        run: just fmt lint test
 
   showcase:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install bubblewrap
         run: |
@@ -56,6 +67,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
+          cache-dependency-path: examples/showcase/frontend/package-lock.json
 
       - name: Build Please CLI
         run: cargo build -p please-cli

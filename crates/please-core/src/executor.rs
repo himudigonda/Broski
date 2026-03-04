@@ -804,7 +804,7 @@ mod tests {
         tasks.insert("build".to_string(), simple_task("echo broken > dist/output.txt && exit 42"));
 
         let config =
-            PleaseFile { please: PleaseSection { version: "0.1".to_string() }, task: tasks };
+            PleaseFile { please: PleaseSection { version: "0.2".to_string() }, task: tasks };
 
         let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
         let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
@@ -908,7 +908,7 @@ mod tests {
         );
 
         let config =
-            PleaseFile { please: PleaseSection { version: "0.1".to_string() }, task: tasks };
+            PleaseFile { please: PleaseSection { version: "0.2".to_string() }, task: tasks };
         let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
         let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
 
@@ -943,7 +943,7 @@ mod tests {
         );
 
         let config =
-            PleaseFile { please: PleaseSection { version: "0.1".to_string() }, task: tasks };
+            PleaseFile { please: PleaseSection { version: "0.2".to_string() }, task: tasks };
         let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
         let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
 

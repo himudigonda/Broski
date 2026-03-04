@@ -47,7 +47,7 @@ mod tests {
     fn parses_minimal_file() {
         let input = r#"
             [please]
-            version = "0.1"
+            version = "0.2"
 
             [task.echo]
             inputs = ["src/main.rs"]
@@ -57,7 +57,7 @@ mod tests {
 
         let parsed =
             parse_pleasefile_with_mode(input, ParserMode::Toml).expect("parse minimal file");
-        assert_eq!(parsed.please.version, "0.1");
+        assert_eq!(parsed.please.version, "0.2");
         assert!(parsed.task.contains_key("echo"));
     }
 
@@ -65,7 +65,7 @@ mod tests {
     fn rejects_unknown_keys() {
         let input = r#"
             [please]
-            version = "0.1"
+            version = "0.2"
 
             [task.echo]
             outputs = ["dist/out.txt"]
@@ -80,7 +80,7 @@ mod tests {
     fn toml_and_winnow_parsers_are_model_equivalent() {
         let input = r#"
             [please]
-            version = "0.1"
+            version = "0.2"
 
             [task.echo]
             deps = []

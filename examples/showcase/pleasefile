@@ -1,5 +1,5 @@
 [please]
-version = "0.1"
+version = "0.2"
 
 [task.build_ui]
 inputs = ["frontend/package.json", "frontend/package-lock.json", "frontend/index.html", "frontend/src/**/*", "frontend/tsconfig.json", "frontend/vite.config.ts"]

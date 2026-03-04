@@ -34,7 +34,7 @@ build: src/main.rs Cargo.toml
 
 ```toml
 [please]
-version = "0.1"
+version = "0.2"
 
 [task.build]
 inputs = ["src/main.rs", "Cargo.toml"]
@@ -50,7 +50,7 @@ lint:
 
 ```toml
 [please]
-version = "0.1"
+version = "0.2"
 
 [task.lint]
 inputs = ["Cargo.toml", "crates/**/*.rs"]
