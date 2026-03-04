@@ -1,0 +1,16 @@
+[please]
+version = "0.1"
+
+[task.a]
+deps = ["b"]
+inputs = ["src/input.txt"]
+outputs = ["dist/a.txt"]
+isolation = "best_effort"
+run = "mkdir -p dist && echo a > dist/a.txt"
+
+[task.b]
+deps = ["a"]
+inputs = ["src/input.txt"]
+outputs = ["dist/b.txt"]
+isolation = "best_effort"
+run = "mkdir -p dist && echo b > dist/b.txt"

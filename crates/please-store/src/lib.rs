@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -21,6 +22,7 @@ pub struct CachedArtifact {
 pub struct ExecutionRecord {
     pub task_name: String,
     pub fingerprint: String,
+    pub manifest: BTreeMap<String, String>,
     pub artifacts: Vec<CachedArtifact>,
     pub stdout: String,
     pub stderr: String,
@@ -40,6 +42,7 @@ pub trait ArtifactStore: Send + Sync {
         task_name: &str,
         fingerprint: &str,
     ) -> Result<Option<ExecutionRecord>>;
+    fn fetch_latest_execution(&self, task_name: &str) -> Result<Option<ExecutionRecord>>;
     fn save_execution(&self, record: &ExecutionRecord) -> Result<()>;
     fn store_artifacts(&self, workspace: &Path, outputs: &[PathBuf])
         -> Result<Vec<CachedArtifact>>;

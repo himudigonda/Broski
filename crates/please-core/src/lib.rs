@@ -10,7 +10,7 @@ pub mod validator;
 
 pub use config::{load_pleasefile, parse_pleasefile_with_mode, ParserMode};
 pub use executor::{Executor, RunOptions, RunSummary};
-pub use fingerprint::{compute_fingerprint, TaskFingerprint};
+pub use fingerprint::{compute_fingerprint, FingerprintResult, TaskFingerprint};
 pub use graph::TaskGraph;
 pub use model::{IsolationMode, PleaseFile, RunSpec, TaskSpec};
 pub use resolver::resolve_inputs;

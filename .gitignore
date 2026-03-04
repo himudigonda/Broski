@@ -4,4 +4,9 @@
 **/*.profdata
 test_project/
 examples/basic/
+examples/showcase/.please/
+examples/showcase/artifacts/
+examples/showcase/backend/target/
+examples/showcase/frontend/dist/
+examples/showcase/frontend/node_modules/
 dumper.sh
