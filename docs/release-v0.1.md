@@ -2,7 +2,7 @@
 
 ## Release type
 - Tag: `v0.1.0-alpha.1`
-- Channel: draft prerelease
+- Channel: prerelease
 - Repository: `himudigonda/Please`
 
 ## Included

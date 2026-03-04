@@ -24,13 +24,13 @@ This runbook covers cutting and publishing `v0.1.0-alpha.1` for `himudigonda/Ple
    - `git tag -a v0.1.0-alpha.1 -m "Please v0.1.0-alpha.1"`
    - `git push origin v0.1.0-alpha.1`
 5. Wait for `release.yml` workflow completion.
-6. Validate draft release contents.
+6. Validate prerelease contents.
    - Artifacts:
      - `please-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz`
      - `please-v0.1.0-alpha.1-aarch64-apple-darwin.tar.gz`
      - `SHA256SUMS.txt`
    - Confirm checksum file contains entries for both artifacts.
-7. Publish the draft prerelease manually in GitHub UI.
+7. Confirm prerelease visibility in GitHub UI.
 
 ## Post-publish validation
 1. Install from published release with installer script.
@@ -41,7 +41,7 @@ This runbook covers cutting and publishing `v0.1.0-alpha.1` for `himudigonda/Ple
    - `please run ci`
 
 ## Rollback / Yank procedure
-1. In GitHub Releases, mark release as draft or delete it.
+1. In GitHub Releases, delete the prerelease.
 2. Delete remote tag:
    - `git push origin :refs/tags/v0.1.0-alpha.1`
 3. Delete local tag:
@@ -53,5 +53,5 @@ This runbook covers cutting and publishing `v0.1.0-alpha.1` for `himudigonda/Ple
 2. Tag new prerelease:
    - `git tag -a v0.1.0-alpha.2 -m "Please v0.1.0-alpha.2"`
    - `git push origin v0.1.0-alpha.2`
-3. Publish new draft prerelease after artifact validation.
+3. Confirm new prerelease after artifact validation.
 4. Keep `v0.1.0-alpha.1` notes for historical traceability.

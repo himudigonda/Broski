@@ -79,12 +79,15 @@ jobs:
           cd dist
           sha256sum please-*.tar.gz > SHA256SUMS.txt
 
-      - name: Create or update draft prerelease
+      - name: Create or update prerelease
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ env.RELEASE_TAG }}
           tag_name: ${{ env.RELEASE_TAG }}
-          draft: true
+          target_commitish: ${{ github.sha }}
+          draft: false
           prerelease: true
+          fail_on_unmatched_files: true
           files: |
             dist/please-*.tar.gz
             dist/SHA256SUMS.txt

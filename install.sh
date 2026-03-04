@@ -4,6 +4,7 @@ set -euo pipefail
 REPO="${PLEASE_REPO:-himudigonda/Please}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${PLEASE_VERSION:-}"
+temp_dir=""
 
 fail() {
   echo "install.sh: $*" >&2
@@ -74,6 +75,12 @@ verify_checksum() {
   fail "no checksum tool found; install sha256sum or shasum"
 }
 
+cleanup() {
+  if [ -n "${temp_dir:-}" ] && [ -d "${temp_dir:-}" ]; then
+    rm -rf "$temp_dir"
+  fi
+}
+
 main() {
   require_cmd curl
   require_cmd tar
@@ -86,7 +93,7 @@ main() {
   base_url="https://github.com/${REPO}/releases/download/${tag}"
 
   temp_dir="$(mktemp -d)"
-  trap 'rm -rf "$temp_dir"' EXIT
+  trap cleanup EXIT
 
   echo "Downloading ${asset} from ${REPO} (${tag})"
   curl -fLsS "${base_url}/${asset}" -o "${temp_dir}/${asset}" || fail "failed to download ${asset}"

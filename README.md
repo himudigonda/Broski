@@ -3,10 +3,10 @@
 `Please` is a deterministic task runner for polyglot projects.
 
 ## Alpha status
-`Please` is currently in **alpha**. The first public alpha release is `v0.1.0-alpha.1`.
-Use it for dogfooding and feedback, not as a guaranteed drop-in replacement for mature build systems yet.
+`Please` is currently in **alpha**. The first public prerelease is `v0.1.0-alpha.1`.
+Use it for dogfooding and feedback. Production-hardening work is ongoing.
 
-## v0.1 capabilities
+## What you get in v0.1
 - TOML `pleasefile` parsing with semantic validation.
 - DAG scheduling with deterministic topological layers.
 - Content-hash fingerprints (BLAKE3) for task invalidation.
@@ -14,53 +14,62 @@ Use it for dogfooding and feedback, not as a guaranteed drop-in replacement for 
 - Staged execution with transactional output promotion.
 - Isolation policy support:
   - Linux: strict isolation via `bwrap`.
-  - macOS: best-effort isolation (strict mode is not supported).
+  - macOS: best-effort isolation (strict mode unsupported).
 
-## Supported alpha binaries
+## Install
+Supported release binaries:
 - `x86_64-unknown-linux-gnu`
 - `aarch64-apple-darwin`
 
-Release assets are published as:
-- `please-<tag>-x86_64-unknown-linux-gnu.tar.gz`
-- `please-<tag>-aarch64-apple-darwin.tar.gz`
-- `SHA256SUMS.txt`
+### Clone-and-install flow
+```bash
+git clone https://github.com/himudigonda/Please.git
+cd Please
+./install.sh
+please --version
+```
 
-## Install (release binary)
-Install the latest published release:
-
+### Curl install flow
 ```bash
 curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | bash
 ```
 
-Install a specific release tag:
-
+Install a specific version:
 ```bash
-PLEASE_VERSION=v0.1.0-alpha.1 curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | bash
+PLEASE_VERSION=v0.1.0-alpha.1 ./install.sh
 ```
 
-By default, the binary installs to `~/.local/bin` (`INSTALL_DIR` can override this).
+Default install dir is `~/.local/bin` (`INSTALL_DIR` can override).
 
-## Developer quick start
+## Usage
+```bash
+please --workspace . list
+please --workspace . run ci
+please --workspace . graph ci --format text
+```
+
+## Drop-in migration path
+`Please` is a workflow replacement for `make`/`just` rather than a syntax-compatible parser.
+Use the migration guide to translate existing recipes into explicit `inputs`/`outputs` task contracts:
+- [Migration guide](/Users/himudigonda/Documents/Projects/Please/docs/migration.md)
+- [Polyglot example](/Users/himudigonda/Documents/Projects/Please/examples/polyglot/pleasefile)
+- [Minimal example](/Users/himudigonda/Documents/Projects/Please/examples/minimal/pleasefile)
+
+## Contributor quick start
 ```bash
 just setup
 just ci
-just run -- list
 ```
 
-## Dogfooding mode (staged)
-During alpha, both task runners are kept:
-- Preferred: `please run ci`
-- Fallback: `just ci`
+You can also run the same gate through Please:
+```bash
+please --workspace . run ci
+```
 
-The root `pleasefile` mirrors core quality gates (`fmt`, `lint`, `test`, `cov`, `ci`).
-
-## Examples
-- Minimal runnable demo: [`examples/basic/pleasefile`](examples/basic/pleasefile)
-- Polyglot template: [`examples/polyglot/pleasefile`](examples/polyglot/pleasefile)
-
-## Coverage gate
-- `just ci` enforces coverage through `cargo llvm-cov`.
-- Override threshold with `PLEASE_COVERAGE_MIN` (default `45` during bootstrap).
+Contribution process and architecture notes:
+- [Contributing guide](/Users/himudigonda/Documents/Projects/Please/CONTRIBUTING.md)
+- [Architecture deep dive](/Users/himudigonda/Documents/Projects/Please/docs/architecture.md)
+- [Release runbook](/Users/himudigonda/Documents/Projects/Please/docs/release-runbook.md)
 
 ## Parser mode
 - Default parser: TOML (`PLEASE_PARSER_MODE=toml`).
