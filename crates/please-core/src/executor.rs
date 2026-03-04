@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -373,7 +374,7 @@ fn copy_workspace_snapshot(source_root: &Path, stage_root: &Path) -> Result<()> 
                 fs::create_dir_all(parent)
                     .with_context(|| format!("creating parent '{}'", parent.display()))?;
             }
-            fs::copy(path, &target)
+            copy_file_with_reflink_fallback(path, &target)
                 .with_context(|| format!("copying workspace file '{}' to stage", path.display()))?;
         } else if entry.file_type().is_symlink() {
             #[cfg(unix)]
@@ -461,6 +462,36 @@ fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
     ))
 }
 
+fn copy_file_with_reflink_fallback(src: &Path, dest: &Path) -> Result<()> {
+    match reflink_copy::reflink(src, dest) {
+        Ok(()) => Ok(()),
+        Err(error) if is_reflink_unsupported(&error) => {
+            fs::copy(src, dest).with_context(|| {
+                format!("copying file '{}' -> '{}'", src.display(), dest.display())
+            })?;
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!("attempting reflink copy for '{}' -> '{}'", src.display(), dest.display())
+        }),
+    }
+}
+
+fn is_reflink_unsupported(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::Unsupported {
+        return true;
+    }
+
+    matches!(
+        error.raw_os_error(),
+        Some(code)
+            if code == libc::ENOTSUP
+                || code == libc::EOPNOTSUPP
+                || code == libc::EXDEV
+                || code == libc::EINVAL
+    )
+}
+
 fn remove_path_if_exists(path: &Path) -> Result<()> {
     if path.is_file() {
         fs::remove_file(path).with_context(|| format!("removing file '{}'", path.display()))?;
@@ -475,10 +506,14 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::model::{PleaseSection, RunSpec};
+    use blake3::Hasher;
     use please_cache::LocalArtifactStore;
     use std::collections::BTreeMap;
+    use std::fs::File;
+    use std::io::Read;
     use std::io::Write;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     fn simple_task(command: &str) -> TaskSpec {
         TaskSpec {
@@ -520,5 +555,50 @@ mod tests {
         let content =
             fs::read_to_string(workspace.join("dist/output.txt")).expect("read old output");
         assert_eq!(content.trim(), "stable");
+    }
+
+    #[test]
+    fn stage_snapshot_preserves_large_file_content() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("data")).expect("create data dir");
+
+        let source_file = workspace.join("data/large.bin");
+        let mut file = File::create(&source_file).expect("create large file");
+        let chunk = vec![0x5Au8; 1024 * 1024];
+        for _ in 0..128 {
+            file.write_all(&chunk).expect("write chunk");
+        }
+        file.sync_all().expect("sync large file");
+
+        let stage = tempfile::tempdir_in(tmp.path()).expect("create stage dir");
+        let start = Instant::now();
+        copy_workspace_snapshot(&workspace, stage.path()).expect("copy workspace snapshot");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "snapshot copy exceeded safety budget: {elapsed:?}"
+        );
+
+        let stage_file = stage.path().join("data/large.bin");
+        assert!(stage_file.exists(), "expected staged large file");
+
+        let source_hash = file_hash(&source_file).expect("hash source");
+        let staged_hash = file_hash(&stage_file).expect("hash stage");
+        assert_eq!(source_hash, staged_hash, "staged file hash mismatch");
+    }
+
+    fn file_hash(path: &Path) -> Result<String> {
+        let mut hasher = Hasher::new();
+        let mut file = File::open(path)?;
+        let mut buffer = [0u8; 16 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+        Ok(hasher.finalize().to_hex().to_string())
     }
 }
