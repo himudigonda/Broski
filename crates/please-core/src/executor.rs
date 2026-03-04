@@ -102,6 +102,16 @@ impl Executor {
     }
 
     pub fn run_target(&self, target: &str, options: &RunOptions) -> Result<RunSummary> {
+        if options.force_isolation {
+            if !cfg!(target_os = "linux") {
+                return Err(anyhow!(
+                    "--force-isolation requires Linux; strict sandbox execution is unsupported on this platform"
+                ));
+            }
+            let _ = which::which("bwrap")
+                .context("--force-isolation requires bubblewrap (`bwrap`) on PATH")?;
+        }
+
         let layers = self.graph.layers_for_target(target)?;
         let mut summary = RunSummary::default();
         let progress_enabled = io::stderr().is_terminal();
