@@ -3,11 +3,12 @@ pub mod executor;
 pub mod fingerprint;
 pub mod graph;
 pub mod model;
+pub mod parser_winnow;
 pub mod resolver;
 pub mod runtime;
 pub mod validator;
 
-pub use config::load_pleasefile;
+pub use config::{load_pleasefile, parse_pleasefile_with_mode, ParserMode};
 pub use executor::{Executor, RunOptions, RunSummary};
 pub use fingerprint::{compute_fingerprint, TaskFingerprint};
 pub use graph::TaskGraph;
