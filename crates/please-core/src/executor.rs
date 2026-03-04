@@ -2,9 +2,11 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use please_cache::{unix_timestamp_secs, ArtifactStore, ExecutionRecord, LocalArtifactStore};
+use please_cache::unix_timestamp_secs;
+use please_store::{ArtifactStore, ExecutionRecord};
 use rayon::prelude::*;
 use tempfile::TempDir;
 use walkdir::{DirEntry, WalkDir};
@@ -42,23 +44,23 @@ struct TaskOutcome {
     dry_run: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Executor {
     workspace_root: PathBuf,
     config: PleaseFile,
     graph: TaskGraph,
-    cache: LocalArtifactStore,
+    store: Arc<dyn ArtifactStore>,
 }
 
 impl Executor {
     pub fn new(
         workspace_root: impl AsRef<Path>,
         config: PleaseFile,
-        cache: LocalArtifactStore,
+        store: Arc<dyn ArtifactStore>,
     ) -> Result<Self> {
         let graph = TaskGraph::build(&config.task)?;
 
-        Ok(Self { workspace_root: workspace_root.as_ref().to_path_buf(), config, graph, cache })
+        Ok(Self { workspace_root: workspace_root.as_ref().to_path_buf(), config, graph, store })
     }
 
     pub fn graph(&self) -> &TaskGraph {
@@ -106,7 +108,7 @@ impl Executor {
         let fingerprint = compute_fingerprint(&self.workspace_root, task_name, task, &inputs)?;
 
         if !options.force && !options.no_cache {
-            if let Some(record) = self.cache.fetch_execution(task_name, &fingerprint.0)? {
+            if let Some(record) = self.store.fetch_execution(task_name, &fingerprint.0)? {
                 if options.dry_run {
                     return Ok(TaskOutcome {
                         task_name: task_name.to_string(),
@@ -115,7 +117,7 @@ impl Executor {
                     });
                 }
 
-                self.cache
+                self.store
                     .restore_artifacts(&self.workspace_root, &record.artifacts)
                     .with_context(|| format!("restoring cache hit for task '{}'", task_name))?;
 
@@ -156,7 +158,7 @@ impl Executor {
             .with_context(|| format!("promoting outputs for task '{}'", task_name))?;
 
         if !options.no_cache {
-            let artifacts = self.cache.store_artifacts(&self.workspace_root, &outputs)?;
+            let artifacts = self.store.store_artifacts(&self.workspace_root, &outputs)?;
             let record = ExecutionRecord {
                 task_name: task_name.to_string(),
                 fingerprint: fingerprint.0,
@@ -165,7 +167,7 @@ impl Executor {
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                 created_at: unix_timestamp_secs(),
             };
-            self.cache.save_execution(&record)?;
+            self.store.save_execution(&record)?;
         }
 
         Ok(TaskOutcome { task_name: task_name.to_string(), from_cache: false, dry_run: false })
@@ -473,8 +475,10 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::model::{PleaseSection, RunSpec};
+    use please_cache::LocalArtifactStore;
     use std::collections::BTreeMap;
     use std::io::Write;
+    use std::sync::Arc;
 
     fn simple_task(command: &str) -> TaskSpec {
         TaskSpec {
@@ -508,7 +512,7 @@ mod tests {
             PleaseFile { please: PleaseSection { version: "0.1".to_string() }, task: tasks };
 
         let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
-        let executor = Executor::new(&workspace, config, cache).expect("create executor");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
 
         let result = executor.run_target("build", &RunOptions::default());
         assert!(result.is_err());
