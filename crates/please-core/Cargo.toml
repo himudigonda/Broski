@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 glob.workspace = true
+indicatif.workspace = true
 libc.workspace = true
 num_cpus.workspace = true
 petgraph.workspace = true
