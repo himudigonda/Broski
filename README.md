@@ -3,7 +3,7 @@
 `Please` is a deterministic task runner for polyglot projects with explicit task contracts (`inputs`, `outputs`, `deps`, `env`, `run`).
 
 ## Status
-Current prerelease target: **`v0.2.0-beta.1`**.
+Current release: **`v0.2.0`**.
 
 ## Why Please
 - Content-hash invalidation (BLAKE3), not mtime heuristics.
@@ -32,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh 
 
 Install specific version:
 ```bash
-PLEASE_VERSION=v0.2.0-beta.1 ./install.sh
+PLEASE_VERSION=v0.2.0 ./install.sh
 ```
 
 ## CLI quickstart
@@ -71,6 +71,20 @@ See:
 - [docs/showcase.md](docs/showcase.md)
 - [examples/showcase/README.md](examples/showcase/README.md)
 
+## Examples Matrix
+Language/framework examples live under `examples/`:
+- `minimal` (single task)
+- `polyglot` (Rust + generated data)
+- `python-cli` (Python + unittest)
+- `go-http` (Go + go test)
+- `node-web` (Node.js + node:test)
+- `showcase` (React + Rust + Docker)
+
+Run smoke validation for all non-Docker examples:
+```bash
+please --workspace . run examples_smoke --explain
+```
+
 ## Migration note
 Please is a workflow replacement for `make`/`just`, not a syntax parser for their files.
 Manual-first migration is intentional to preserve deterministic contracts.
@@ -78,8 +92,14 @@ See [docs/migration.md](docs/migration.md).
 
 ## Developer quickstart
 ```bash
-just setup
-just ci
+# build the Please CLI
+cargo build --release -p please-cli
+
+# use local release binary
+./target/release/please --workspace . run ci
+
+# optional: put it on PATH for this shell
+alias please="$(pwd)/target/release/please"
 please --workspace . run ci
 ```
 

@@ -13,17 +13,17 @@ Thanks for contributing.
 ```bash
 git clone https://github.com/himudigonda/Please.git
 cd Please
-just setup
+cargo build --release -p please-cli
 ```
 
 ## Required quality gate
 Run before every PR:
 ```bash
-just ci
+./target/release/please --workspace . run ci
 ```
-Parity check via Please:
+If you prefer using a debug build during active development:
 ```bash
-please --workspace . run ci
+cargo run -p please-cli -- --workspace . run ci
 ```
 
 ## CI no-break policy
