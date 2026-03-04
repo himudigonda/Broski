@@ -23,12 +23,19 @@ pub struct RunOptions {
     pub dry_run: bool,
     pub force: bool,
     pub no_cache: bool,
+    pub force_isolation: bool,
     pub jobs: usize,
 }
 
 impl Default for RunOptions {
     fn default() -> Self {
-        Self { dry_run: false, force: false, no_cache: false, jobs: num_cpus::get().max(1) }
+        Self {
+            dry_run: false,
+            force: false,
+            no_cache: false,
+            force_isolation: false,
+            jobs: num_cpus::get().max(1),
+        }
     }
 }
 
@@ -147,7 +154,7 @@ impl Executor {
 
         let stage = self.create_stage_snapshot(task_name)?;
         let output = self
-            .run_task_command(task_name, task, stage.path())
+            .run_task_command(task_name, task, stage.path(), options)
             .with_context(|| format!("executing task '{}'", task_name))?;
 
         if !output.status.success() {
@@ -201,8 +208,11 @@ impl Executor {
         _task_name: &str,
         task: &TaskSpec,
         stage_workspace: &Path,
+        options: &RunOptions,
     ) -> Result<Output> {
-        let mut command = match task.effective_isolation() {
+        let isolation_mode = selected_isolation(task, options);
+
+        let mut command = match isolation_mode {
             IsolationMode::Strict if cfg!(target_os = "linux") => {
                 let bwrap = which::which("bwrap").context(
                     "strict isolation requires bubblewrap (`bwrap`) to be installed on Linux",
@@ -244,7 +254,7 @@ impl Executor {
 
         command.current_dir(stage_workspace);
 
-        match task.effective_isolation() {
+        match isolation_mode {
             IsolationMode::Strict | IsolationMode::BestEffort => {
                 command.env_clear();
                 for key in ["PATH", "HOME", "USER", "TMPDIR", "SHELL", "TERM"] {
@@ -345,6 +355,14 @@ impl Executor {
         }
 
         Ok(())
+    }
+}
+
+fn selected_isolation(task: &TaskSpec, options: &RunOptions) -> IsolationMode {
+    if options.force_isolation {
+        IsolationMode::Strict
+    } else {
+        task.effective_isolation()
     }
 }
 
@@ -607,5 +625,38 @@ mod tests {
             hasher.update(&buffer[..count]);
         }
         Ok(hasher.finalize().to_hex().to_string())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn force_isolation_fails_on_non_linux() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::write(workspace.join("src/input.txt"), "hello").expect("write input");
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "build".to_string(),
+            TaskSpec {
+                deps: vec![],
+                inputs: vec!["src/input.txt".to_string()],
+                outputs: vec!["dist/output.txt".to_string()],
+                env: BTreeMap::new(),
+                run: RunSpec::Shell(
+                    "mkdir -p dist && cp src/input.txt dist/output.txt".to_string(),
+                ),
+                isolation: Some(IsolationMode::Off),
+            },
+        );
+
+        let config =
+            PleaseFile { please: PleaseSection { version: "0.1".to_string() }, task: tasks };
+        let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
+
+        let result = executor
+            .run_target("build", &RunOptions { force_isolation: true, ..RunOptions::default() });
+        assert!(result.is_err());
     }
 }
