@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (for example: v0.2.0-beta.1)"
+        description: "Tag to release (for example: v0.2.0 or v0.3.0-rc.1)"
         required: true
         type: string
 
@@ -61,7 +61,7 @@ jobs:
           path: dist/*.tar.gz
 
   release:
-    name: publish draft release
+    name: publish release
     runs-on: ubuntu-latest
     needs: build
 
@@ -79,14 +79,14 @@ jobs:
           cd dist
           sha256sum please-*.tar.gz > SHA256SUMS.txt
 
-      - name: Create or update prerelease
+      - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ env.RELEASE_TAG }}
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
           draft: false
-          prerelease: true
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           fail_on_unmatched_files: true
           files: |
             dist/please-*.tar.gz

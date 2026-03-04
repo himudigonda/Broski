@@ -30,23 +30,20 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
 
-      - name: Install just
-        uses: taiki-e/install-action@just
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@cargo-nextest
-
       - name: Install cargo-llvm-cov
         if: matrix.os == 'ubuntu-latest'
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Build Please CLI
+        run: cargo build -p please-cli
+
       - name: Run quality gate (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: just ci
+        run: ./target/debug/please --workspace . run ci
 
       - name: Run quality gate (macOS fast path)
         if: matrix.os == 'macos-latest'
-        run: just fmt lint test
+        run: ./target/debug/please --workspace . run test
 
   showcase:
     runs-on: ubuntu-latest
