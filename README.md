@@ -24,3 +24,7 @@ just run -- list
 ## Coverage Gate
 - `just ci` enforces coverage through `cargo llvm-cov`.
 - Override threshold with `PLEASE_COVERAGE_MIN` (default `45` during bootstrap).
+
+## Parser Mode
+- Default parser: TOML (`PLEASE_PARSER_MODE=toml`).
+- Experimental parser path: `PLEASE_PARSER_MODE=winnow`.

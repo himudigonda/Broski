@@ -12,3 +12,4 @@
 - No remote cache backend in v0.1.
 - Stage snapshot currently copies workspace files (correctness-first, not optimized).
 - Coverage gate default in `just ci` is bootstrap-oriented (`PLEASE_COVERAGE_MIN`, default 45).
+- Winnow parser path is opt-in (`PLEASE_PARSER_MODE=winnow`); TOML remains default.
