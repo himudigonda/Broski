@@ -772,6 +772,8 @@ mod tests {
     use std::fs::File;
     use std::io::Read;
     use std::io::Write;
+    #[cfg(target_os = "linux")]
+    use std::process::Command as ProcessCommand;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -880,10 +882,43 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn strict_bwrap_supported() -> bool {
+        let Ok(bwrap) = which::which("bwrap") else {
+            return false;
+        };
+
+        let Ok(output) = ProcessCommand::new(bwrap)
+            .arg("--die-with-parent")
+            .arg("--new-session")
+            .arg("--unshare-net")
+            .arg("--ro-bind")
+            .arg("/")
+            .arg("/")
+            .arg("--proc")
+            .arg("/proc")
+            .arg("--dev")
+            .arg("/dev")
+            .arg("--tmpfs")
+            .arg("/tmp")
+            .arg("/bin/sh")
+            .arg("-lc")
+            .arg("echo PLEASE_BWRAP_TEST")
+            .output()
+        else {
+            return false;
+        };
+
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains("PLEASE_BWRAP_TEST")
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn strict_isolation_executes_when_bwrap_available() {
-        if which::which("bwrap").is_err() {
-            eprintln!("skipping strict isolation test because bwrap is unavailable");
+        // CI/container kernels may expose bwrap but block required namespace operations.
+        // Only run this test when strict bwrap execution is actually viable.
+        if !strict_bwrap_supported() {
+            eprintln!("skipping strict isolation test because bwrap strict mode is unavailable");
             return;
         }
 
