@@ -5,53 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+use please_store::{ArtifactKind, ArtifactStore, CachedArtifact, ExecutionRecord, PruneReport};
 use rusqlite::{params, Connection};
-use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactKind {
-    File,
-    Directory,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CachedArtifact {
-    pub relative_path: String,
-    pub object_hash: String,
-    pub kind: ArtifactKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionRecord {
-    pub task_name: String,
-    pub fingerprint: String,
-    pub artifacts: Vec<CachedArtifact>,
-    pub stdout: String,
-    pub stderr: String,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct PruneReport {
-    pub removed_objects: usize,
-    pub removed_bytes: u64,
-    pub remaining_bytes: u64,
-}
-
-pub trait ArtifactStore {
-    fn fetch_execution(
-        &self,
-        task_name: &str,
-        fingerprint: &str,
-    ) -> Result<Option<ExecutionRecord>>;
-    fn save_execution(&self, record: &ExecutionRecord) -> Result<()>;
-    fn store_artifacts(&self, workspace: &Path, outputs: &[PathBuf])
-        -> Result<Vec<CachedArtifact>>;
-    fn restore_artifacts(&self, workspace: &Path, artifacts: &[CachedArtifact]) -> Result<()>;
-    fn prune(&self, max_size_mb: u64) -> Result<PruneReport>;
-}
 
 #[derive(Debug, Clone)]
 pub struct LocalArtifactStore {
