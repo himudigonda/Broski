@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::io::IsTerminal;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::{self, Sender};
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use aho_corasick::AhoCorasick;
 use anyhow::{anyhow, Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use please_cache::unix_timestamp_secs;
@@ -123,6 +125,7 @@ impl Executor {
 
         let resolved_target = self.config.resolve_task_name(target)?;
         let layers = self.graph.layers_for_target(&resolved_target)?;
+        self.preflight_requires(&layers)?;
         let mut summary = RunSummary::default();
         let progress_enabled = io::stderr().is_terminal();
         let mut renderer: Option<thread::JoinHandle<()>> = None;
@@ -195,20 +198,47 @@ impl Executor {
         Ok(summary)
     }
 
+    fn preflight_requires(&self, layers: &[Vec<String>]) -> Result<()> {
+        let mut checked = BTreeSet::new();
+        for layer in layers {
+            for task_name in layer {
+                let task = self
+                    .config
+                    .task
+                    .get(task_name)
+                    .ok_or_else(|| anyhow!("task '{}' not found", task_name))?;
+                for requirement in &task.requires {
+                    if checked.insert(requirement.clone()) && which::which(requirement).is_err() {
+                        return Err(anyhow!(
+                            "task '{}' requires '{}', but it was not found on PATH",
+                            task_name,
+                            requirement
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn execute_task(
         &self,
         task_name: &str,
         options: &RunOptions,
         progress: Option<Sender<ProgressEvent>>,
     ) -> Result<TaskOutcome> {
-        emit_progress(&progress, ProgressEvent::TaskStarted(task_name.to_string()));
         let task = self
             .config
             .task
             .get(task_name)
             .ok_or_else(|| anyhow!("task '{}' not found", task_name))?;
         let task_mode = task.inferred_mode();
+        let show_progress = task_mode != TaskMode::Interactive;
+        if show_progress {
+            emit_progress(&progress, ProgressEvent::TaskStarted(task_name.to_string()));
+        }
         let (resolved_env, secret_env_keys) = self.resolve_task_env(task)?;
+        let redactor = SecretRedactor::from_env(&resolved_env, &secret_env_keys);
 
         if task_mode == TaskMode::Interactive {
             if options.force_isolation {
@@ -219,10 +249,15 @@ impl Executor {
             }
 
             if options.dry_run {
-                emit_progress(
-                    &progress,
-                    ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::DryRun),
-                );
+                if show_progress {
+                    emit_progress(
+                        &progress,
+                        ProgressEvent::TaskFinished(
+                            task_name.to_string(),
+                            TaskProgressStatus::DryRun,
+                        ),
+                    );
+                }
                 return Ok(TaskOutcome {
                     task_name: task_name.to_string(),
                     from_cache: false,
@@ -235,12 +270,23 @@ impl Executor {
                 });
             }
 
-            self.run_interactive_command(task_name, task, &resolved_env, options)
-                .with_context(|| format!("executing interactive task '{}'", task_name))?;
-            emit_progress(
-                &progress,
-                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Executed),
-            );
+            self.run_interactive_command(
+                task_name,
+                task,
+                &resolved_env,
+                redactor.as_ref(),
+                options,
+            )
+            .with_context(|| format!("executing interactive task '{}'", task_name))?;
+            if show_progress {
+                emit_progress(
+                    &progress,
+                    ProgressEvent::TaskFinished(
+                        task_name.to_string(),
+                        TaskProgressStatus::Executed,
+                    ),
+                );
+            }
             return Ok(TaskOutcome {
                 task_name: task_name.to_string(),
                 from_cache: false,
@@ -271,13 +317,15 @@ impl Executor {
                 self.store.fetch_execution(task_name, &fingerprint_result.fingerprint.0)?
             {
                 if options.dry_run {
-                    emit_progress(
-                        &progress,
-                        ProgressEvent::TaskFinished(
-                            task_name.to_string(),
-                            TaskProgressStatus::DryRun,
-                        ),
-                    );
+                    if show_progress {
+                        emit_progress(
+                            &progress,
+                            ProgressEvent::TaskFinished(
+                                task_name.to_string(),
+                                TaskProgressStatus::DryRun,
+                            ),
+                        );
+                    }
                     return Ok(TaskOutcome {
                         task_name: task_name.to_string(),
                         from_cache: true,
@@ -290,13 +338,15 @@ impl Executor {
                     .restore_artifacts(&self.workspace_root, &record.artifacts)
                     .with_context(|| format!("restoring cache hit for task '{}'", task_name))?;
 
-                emit_progress(
-                    &progress,
-                    ProgressEvent::TaskFinished(
-                        task_name.to_string(),
-                        TaskProgressStatus::CacheHit,
-                    ),
-                );
+                if show_progress {
+                    emit_progress(
+                        &progress,
+                        ProgressEvent::TaskFinished(
+                            task_name.to_string(),
+                            TaskProgressStatus::CacheHit,
+                        ),
+                    );
+                }
                 return Ok(TaskOutcome {
                     task_name: task_name.to_string(),
                     from_cache: true,
@@ -312,10 +362,12 @@ impl Executor {
         }
 
         if options.dry_run {
-            emit_progress(
-                &progress,
-                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::DryRun),
-            );
+            if show_progress {
+                emit_progress(
+                    &progress,
+                    ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::DryRun),
+                );
+            }
             return Ok(TaskOutcome {
                 task_name: task_name.to_string(),
                 from_cache: false,
@@ -328,12 +380,15 @@ impl Executor {
         let output = self
             .run_task_command(task_name, task, stage.path(), &resolved_env, options)
             .with_context(|| format!("executing task '{}'", task_name))?;
+        let output = redact_output(output, redactor.as_ref());
 
         if !output.status.success() {
-            emit_progress(
-                &progress,
-                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Failed),
-            );
+            if show_progress {
+                emit_progress(
+                    &progress,
+                    ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Failed),
+                );
+            }
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             return Err(anyhow!(
@@ -362,10 +417,12 @@ impl Executor {
             self.store.save_execution(&record)?;
         }
 
-        emit_progress(
-            &progress,
-            ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Executed),
-        );
+        if show_progress {
+            emit_progress(
+                &progress,
+                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Executed),
+            );
+        }
         Ok(TaskOutcome {
             task_name: task_name.to_string(),
             from_cache: false,
@@ -490,6 +547,7 @@ impl Executor {
         task_name: &str,
         task: &TaskSpec,
         resolved_env: &BTreeMap<String, String>,
+        redactor: Option<&SecretRedactor>,
         options: &RunOptions,
     ) -> Result<()> {
         let shell_command = build_shell_command(task, &options.passthrough_args);
@@ -499,15 +557,34 @@ impl Executor {
         command.arg("-lc").arg(&shell_command);
         command
             .current_dir(resolve_execution_dir(&self.workspace_root, task.working_dir.as_deref())?);
-        command.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        command.stdin(Stdio::inherit());
+        if redactor.is_some() {
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        } else {
+            command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        }
 
         for (key, value) in resolved_env {
             command.env(key, value);
         }
 
-        let status = command
-            .status()
-            .with_context(|| format!("spawning interactive task command '{}'", shell_command))?;
+        let status = if let Some(redactor) = redactor {
+            let output = command.output().with_context(|| {
+                format!("spawning interactive task command '{}'", shell_command)
+            })?;
+            let output = redact_output(output, Some(redactor));
+            io::stdout()
+                .write_all(&output.stdout)
+                .context("writing redacted interactive stdout")?;
+            io::stderr()
+                .write_all(&output.stderr)
+                .context("writing redacted interactive stderr")?;
+            output.status
+        } else {
+            command
+                .status()
+                .with_context(|| format!("spawning interactive task command '{}'", shell_command))?
+        };
         if status.success() {
             Ok(())
         } else {
@@ -700,6 +777,53 @@ fn apply_outcome(summary: &mut RunSummary, outcome: TaskOutcome) {
     if !outcome.cache_miss_reasons.is_empty() {
         summary.cache_miss_reasons.insert(task_name, outcome.cache_miss_reasons);
     }
+}
+
+#[derive(Clone)]
+struct SecretRedactor {
+    matcher: AhoCorasick,
+    replacements: Vec<String>,
+}
+
+impl SecretRedactor {
+    fn from_env(
+        resolved_env: &BTreeMap<String, String>,
+        secret_env_keys: &BTreeSet<String>,
+    ) -> Option<Self> {
+        let mut patterns = Vec::new();
+        for key in secret_env_keys {
+            if let Some(value) = resolved_env.get(key) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    patterns.push(trimmed.to_string());
+                }
+            }
+        }
+        patterns.sort();
+        patterns.dedup();
+        if patterns.is_empty() {
+            return None;
+        }
+        let matcher = AhoCorasick::new(&patterns).ok()?;
+        let replacements = vec!["[REDACTED]".to_string(); patterns.len()];
+        Some(Self { matcher, replacements })
+    }
+
+    fn redact_text(&self, input: &str) -> String {
+        let replacements: Vec<&str> = self.replacements.iter().map(String::as_str).collect();
+        self.matcher.replace_all(input, &replacements)
+    }
+}
+
+fn redact_output(mut output: Output, redactor: Option<&SecretRedactor>) -> Output {
+    let Some(redactor) = redactor else {
+        return output;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    output.stdout = redactor.redact_text(&stdout).into_bytes();
+    output.stderr = redactor.redact_text(&stderr).into_bytes();
+    output
 }
 
 fn build_shell_command(task: &TaskSpec, passthrough_args: &[String]) -> String {
@@ -987,6 +1111,7 @@ mod tests {
     use std::fs::File;
     use std::io::Read;
     use std::io::Write;
+    use std::os::unix::process::ExitStatusExt;
     #[cfg(target_os = "linux")]
     use std::process::Command as ProcessCommand;
     use std::sync::Arc;
@@ -1006,6 +1131,7 @@ mod tests {
             isolation: Some(IsolationMode::BestEffort),
             mode: Some(TaskMode::Graph),
             working_dir: None,
+            requires: Vec::new(),
         }
     }
 
@@ -1106,6 +1232,55 @@ mod tests {
         assert!(reasons.iter().any(|r| r.contains("output contract added: dist/out.txt")));
     }
 
+    #[test]
+    fn fails_fast_when_required_tool_is_missing() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::write(workspace.join("src/input.txt"), "hello").expect("write input");
+
+        let mut task = simple_task("mkdir -p dist && cp src/input.txt dist/output.txt");
+        task.requires = vec!["please-missing-tool-binary".to_string()];
+        let mut tasks = BTreeMap::new();
+        tasks.insert("build".to_string(), task);
+
+        let config = PleaseFile {
+            please: PleaseSection { version: "0.4".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+        let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
+
+        let error = executor
+            .run_target("build", &RunOptions::default())
+            .expect_err("missing requirement should fail");
+        assert!(error.to_string().contains("requires 'please-missing-tool-binary'"));
+    }
+
+    #[test]
+    fn redacts_secret_values_in_output() {
+        let redactor = SecretRedactor::from_env(
+            &BTreeMap::from([("TOKEN".to_string(), "supersecret".to_string())]),
+            &BTreeSet::from(["TOKEN".to_string()]),
+        )
+        .expect("redactor");
+
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"token=supersecret".to_vec(),
+            stderr: b"err supersecret".to_vec(),
+        };
+        let redacted = redact_output(output, Some(&redactor));
+        let stdout = String::from_utf8_lossy(&redacted.stdout);
+        let stderr = String::from_utf8_lossy(&redacted.stderr);
+        assert!(!stdout.contains("supersecret"));
+        assert!(!stderr.contains("supersecret"));
+        assert!(stdout.contains("[REDACTED]"));
+        assert!(stderr.contains("[REDACTED]"));
+    }
+
     #[cfg(target_os = "linux")]
     fn strict_bwrap_supported() -> bool {
         let Ok(bwrap) = which::which("bwrap") else {
@@ -1170,6 +1345,7 @@ mod tests {
                 isolation: Some(IsolationMode::Strict),
                 mode: Some(TaskMode::Graph),
                 working_dir: None,
+                requires: Vec::new(),
             },
         );
 
@@ -1215,6 +1391,7 @@ mod tests {
                 isolation: Some(IsolationMode::Off),
                 mode: Some(TaskMode::Graph),
                 working_dir: None,
+                requires: Vec::new(),
             },
         );
 

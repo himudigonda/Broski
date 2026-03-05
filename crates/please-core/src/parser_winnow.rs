@@ -23,6 +23,7 @@ struct TaskDraft {
     isolation: Option<crate::model::IsolationMode>,
     mode: Option<TaskMode>,
     working_dir: Option<String>,
+    requires: Vec<String>,
     run_lines: Vec<String>,
 }
 
@@ -244,6 +245,12 @@ pub fn parse_pleasefile_dsl_with_workspace(
             continue;
         }
 
+        if let Some(rest) = body.strip_prefix("@requires") {
+            let values = split_items(rest, line_no, "@requires")?;
+            task.requires.extend(values);
+            continue;
+        }
+
         if let Some(rest) = body.strip_prefix("@isolation") {
             let values = split_items(rest, line_no, "@isolation")?;
             if values.len() != 1 {
@@ -306,6 +313,7 @@ pub fn parse_pleasefile_dsl_with_workspace(
                 isolation: draft.isolation,
                 mode: draft.mode,
                 working_dir: draft.working_dir,
+                requires: draft.requires,
             },
         );
     }
@@ -668,6 +676,7 @@ mod tests {
                 @dir crates/please-core
                 @mode graph
                 @isolation off
+                @requires cargo rustc
                 cargo build --release
 
             prep:
@@ -686,6 +695,7 @@ mod tests {
         assert!(build.secret_env.contains(&"API_KEY".to_string()));
         assert_eq!(build.mode, Some(TaskMode::Graph));
         assert_eq!(build.isolation, Some(crate::model::IsolationMode::Off));
+        assert_eq!(build.requires, vec!["cargo".to_string(), "rustc".to_string()]);
     }
 
     #[test]

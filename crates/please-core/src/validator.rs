@@ -162,6 +162,7 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            requires: Vec::new(),
         }
     }
 

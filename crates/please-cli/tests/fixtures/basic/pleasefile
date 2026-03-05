@@ -28,3 +28,9 @@ dev_echo:
     @mode interactive
     @isolation off
     echo interactive-ok
+
+secret_echo:
+    @mode interactive
+    @isolation off
+    @secret_env TOKEN
+    echo token=$TOKEN

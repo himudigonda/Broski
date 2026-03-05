@@ -48,6 +48,7 @@ fn benchmark_fingerprint(c: &mut Criterion) {
             isolation: None,
             mode: None,
             working_dir: None,
+            requires: Vec::new(),
         };
 
         let resolved = vec![PathBuf::from("src/main.rs")];
@@ -85,6 +86,7 @@ fn task(deps: &[&str]) -> TaskSpec {
         isolation: None,
         mode: None,
         working_dir: None,
+        requires: Vec::new(),
     }
 }
 

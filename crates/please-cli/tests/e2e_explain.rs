@@ -158,3 +158,18 @@ fn test_explain_reports_passthrough_arg_cache_delta() {
         .success()
         .stdout(predicate::str::contains("cache miss: task:passthrough_args changed"));
 }
+
+#[test]
+fn test_interactive_secret_output_is_redacted() {
+    let temp = support::workspace_from_fixture("basic");
+    let workspace = temp.path();
+
+    support::please_cmd(workspace)
+        .arg("run")
+        .arg("secret_echo")
+        .env("TOKEN", "topsecret123")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("token=[REDACTED]"))
+        .stdout(predicate::str::contains("topsecret123").not());
+}

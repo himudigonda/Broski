@@ -70,6 +70,8 @@ pub struct TaskSpec {
     pub mode: Option<TaskMode>,
     #[serde(default)]
     pub working_dir: Option<String>,
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
