@@ -1,22 +1,25 @@
 use std::fs;
 use std::path::Path;
+use std::sync::Once;
 
 use anyhow::{Context, Result};
 
 use crate::model::PleaseFile;
-use crate::parser_winnow::parse_pleasefile_winnow;
+use crate::parser_winnow::parse_pleasefile_dsl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParserMode {
+    Auto,
     Toml,
-    Winnow,
+    Dsl,
 }
 
 impl ParserMode {
     pub fn from_env() -> Self {
         match std::env::var("PLEASE_PARSER_MODE") {
-            Ok(value) if value.eq_ignore_ascii_case("winnow") => ParserMode::Winnow,
-            _ => ParserMode::Toml,
+            Ok(value) if value.eq_ignore_ascii_case("toml") => ParserMode::Toml,
+            Ok(value) if value.eq_ignore_ascii_case("dsl") => ParserMode::Dsl,
+            _ => ParserMode::Auto,
         }
     }
 }
@@ -34,9 +37,44 @@ pub fn parse_pleasefile(content: &str) -> Result<PleaseFile> {
 
 pub fn parse_pleasefile_with_mode(content: &str, mode: ParserMode) -> Result<PleaseFile> {
     match mode {
-        ParserMode::Toml => toml::from_str(content).context("parsing pleasefile TOML"),
-        ParserMode::Winnow => parse_pleasefile_winnow(content).context("parsing pleasefile Winnow"),
+        ParserMode::Toml => parse_toml(content),
+        ParserMode::Dsl => parse_pleasefile_dsl(content),
+        ParserMode::Auto => {
+            if looks_like_toml(content) {
+                warn_toml_deprecated();
+                parse_toml(content)
+            } else {
+                parse_pleasefile_dsl(content)
+            }
+        }
     }
+}
+
+fn parse_toml(content: &str) -> Result<PleaseFile> {
+    toml::from_str(content).context("parsing pleasefile TOML")
+}
+
+fn looks_like_toml(content: &str) -> bool {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        return trimmed == "[please]"
+            || trimmed.starts_with("[task.")
+            || trimmed.starts_with("[alias")
+            || trimmed.starts_with("[load");
+    }
+    false
+}
+
+fn warn_toml_deprecated() {
+    static WARN_ONCE: Once = Once::new();
+    WARN_ONCE.call_once(|| {
+        eprintln!(
+            "warning: TOML pleasefile is deprecated; migrate to DSL (version = \"0.3\") before v0.5"
+        );
+    });
 }
 
 #[cfg(test)]
@@ -44,7 +82,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_minimal_file() {
+    fn parses_minimal_dsl_file() {
+        let input = r#"
+            version = "0.3"
+
+            echo:
+                @out dist/out.txt
+                echo hi > dist/out.txt
+        "#;
+
+        let parsed =
+            parse_pleasefile_with_mode(input, ParserMode::Dsl).expect("parse minimal file");
+        assert_eq!(parsed.please.version, "0.3");
+        assert!(parsed.task.contains_key("echo"));
+    }
+
+    #[test]
+    fn parses_toml_file_with_explicit_mode() {
         let input = r#"
             [please]
             version = "0.2"
@@ -55,47 +109,39 @@ mod tests {
             run = "echo hi"
         "#;
 
-        let parsed =
-            parse_pleasefile_with_mode(input, ParserMode::Toml).expect("parse minimal file");
+        let parsed = parse_pleasefile_with_mode(input, ParserMode::Toml).expect("parse toml");
         assert_eq!(parsed.please.version, "0.2");
         assert!(parsed.task.contains_key("echo"));
     }
 
     #[test]
-    fn rejects_unknown_keys() {
+    fn autodetect_prefers_dsl_when_no_toml_sections() {
         let input = r#"
-            [please]
-            version = "0.2"
+            version = "0.3"
 
-            [task.echo]
-            outputs = ["dist/out.txt"]
-            run = "echo hi"
-            unknown = "nope"
+            hello:
+                echo hi
         "#;
 
-        assert!(parse_pleasefile_with_mode(input, ParserMode::Toml).is_err());
+        let parsed = parse_pleasefile_with_mode(input, ParserMode::Auto).expect("parse dsl auto");
+        assert_eq!(parsed.please.version, "0.3");
+        assert!(parsed.task.contains_key("hello"));
     }
 
     #[test]
-    fn toml_and_winnow_parsers_are_model_equivalent() {
+    fn autodetect_supports_toml_fallback() {
         let input = r#"
             [please]
             version = "0.2"
 
-            [task.echo]
-            deps = []
+            [task.hello]
             inputs = ["src/main.rs"]
             outputs = ["dist/out.txt"]
-            env = { MODE = "dev" }
-            run = ["echo", "hi"]
-            isolation = "best_effort"
+            run = "echo hi"
         "#;
 
-        let toml = parse_pleasefile_with_mode(input, ParserMode::Toml).expect("parse toml");
-        let winnow = parse_pleasefile_with_mode(input, ParserMode::Winnow).expect("parse winnow");
-
-        let toml_json = serde_json::to_value(toml).expect("serialize toml model");
-        let winnow_json = serde_json::to_value(winnow).expect("serialize winnow model");
-        assert_eq!(toml_json, winnow_json);
+        let parsed = parse_pleasefile_with_mode(input, ParserMode::Auto).expect("parse toml auto");
+        assert_eq!(parsed.please.version, "0.2");
+        assert!(parsed.task.contains_key("hello"));
     }
 }

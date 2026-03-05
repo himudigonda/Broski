@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,9 @@ pub fn compute_fingerprint(
     task_name: &str,
     task: &TaskSpec,
     resolved_inputs: &[PathBuf],
+    resolved_env: &BTreeMap<String, String>,
+    secret_env_keys: &BTreeSet<String>,
+    passthrough_args: &[String],
 ) -> Result<FingerprintResult> {
     let mut manifest = BTreeMap::new();
 
@@ -32,13 +35,26 @@ pub fn compute_fingerprint(
         "task:isolation".to_string(),
         digest_value(&format!("{:?}", task.effective_isolation())),
     );
+    manifest.insert("task:mode".to_string(), digest_value(&format!("{:?}", task.inferred_mode())));
+    manifest.insert(
+        "task:working_dir".to_string(),
+        digest_value(task.working_dir.as_deref().unwrap_or(".")),
+    );
+    manifest.insert(
+        "task:passthrough_args".to_string(),
+        digest_value(&passthrough_args.join("\u{1f}")),
+    );
 
     for (idx, pattern) in task.inputs.iter().enumerate() {
         manifest.insert(format!("input_pattern:{idx}:{pattern}"), digest_value(pattern));
     }
 
-    for (key, value) in &task.env {
-        manifest.insert(format!("env:{key}"), digest_value(value));
+    for (key, value) in resolved_env {
+        if secret_env_keys.contains(key) {
+            manifest.insert(format!("secret_env:{key}"), digest_value(value));
+        } else {
+            manifest.insert(format!("env:{key}"), digest_value(value));
+        }
     }
 
     for input in resolved_inputs {
@@ -146,8 +162,12 @@ mod tests {
             inputs: vec!["src/main.rs".to_string()],
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
+            env_inherit: Vec::new(),
+            secret_env: Vec::new(),
             run: RunSpec::Shell("echo hi".to_string()),
             isolation: None,
+            mode: None,
+            working_dir: None,
         }
     }
 
@@ -161,8 +181,13 @@ mod tests {
         let task = base_task();
         let resolved = vec![PathBuf::from("src/main.rs")];
 
-        let first = compute_fingerprint(temp.path(), "build", &task, &resolved).expect("first");
-        let second = compute_fingerprint(temp.path(), "build", &task, &resolved).expect("second");
+        let env = BTreeMap::new();
+        let secret = BTreeSet::new();
+        let first = compute_fingerprint(temp.path(), "build", &task, &resolved, &env, &secret, &[])
+            .expect("first");
+        let second =
+            compute_fingerprint(temp.path(), "build", &task, &resolved, &env, &secret, &[])
+                .expect("second");
 
         assert_eq!(first, second);
     }
@@ -186,10 +211,15 @@ mod tests {
 
         let resolved = vec![PathBuf::from("src/main.rs")];
 
+        let env_a = BTreeMap::from([("MODE".to_string(), "a".to_string())]);
+        let env_b = BTreeMap::from([("MODE".to_string(), "b".to_string())]);
+        let secret = BTreeSet::new();
         let fp_a =
-            compute_fingerprint(temp.path(), "build", &task_a, &resolved).expect("fingerprint a");
+            compute_fingerprint(temp.path(), "build", &task_a, &resolved, &env_a, &secret, &[])
+                .expect("fingerprint a");
         let fp_b =
-            compute_fingerprint(temp.path(), "build", &task_b, &resolved).expect("fingerprint b");
+            compute_fingerprint(temp.path(), "build", &task_b, &resolved, &env_b, &secret, &[])
+                .expect("fingerprint b");
 
         assert_ne!(fp_a.fingerprint, fp_b.fingerprint);
         assert_ne!(fp_a.manifest.get("env:MODE"), fp_b.manifest.get("env:MODE"));
@@ -203,12 +233,19 @@ mod tests {
             inputs: vec!["src/missing.txt".to_string()],
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
+            env_inherit: Vec::new(),
+            secret_env: Vec::new(),
             run: RunSpec::Shell("echo hi".to_string()),
             isolation: None,
+            mode: None,
+            working_dir: None,
         };
         let resolved = vec![PathBuf::from("src/missing.txt")];
 
-        let fp = compute_fingerprint(temp.path(), "build", &task, &resolved).expect("fingerprint");
+        let env = BTreeMap::new();
+        let secret = BTreeSet::new();
+        let fp = compute_fingerprint(temp.path(), "build", &task, &resolved, &env, &secret, &[])
+            .expect("fingerprint");
         assert!(fp.manifest.contains_key("input:src/missing.txt"));
         assert!(!fp.fingerprint.0.is_empty());
     }
@@ -226,13 +263,21 @@ mod tests {
             inputs: vec!["src".to_string()],
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
+            env_inherit: Vec::new(),
+            secret_env: Vec::new(),
             run: RunSpec::Shell("echo hi".to_string()),
             isolation: None,
+            mode: None,
+            working_dir: None,
         };
 
         let resolved = vec![PathBuf::from("src")];
-        let first = compute_fingerprint(root, "build", &task, &resolved).expect("first");
-        let second = compute_fingerprint(root, "build", &task, &resolved).expect("second");
+        let env = BTreeMap::new();
+        let secret = BTreeSet::new();
+        let first = compute_fingerprint(root, "build", &task, &resolved, &env, &secret, &[])
+            .expect("first");
+        let second = compute_fingerprint(root, "build", &task, &resolved, &env, &secret, &[])
+            .expect("second");
         assert_eq!(first.fingerprint, second.fingerprint);
         assert_eq!(first.manifest.get("input:src"), second.manifest.get("input:src"));
     }

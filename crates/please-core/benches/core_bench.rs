@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -40,15 +40,30 @@ fn benchmark_fingerprint(c: &mut Criterion) {
             inputs: vec!["src/main.rs".to_string()],
             outputs: vec!["dist/app".to_string()],
             env: BTreeMap::new(),
+            env_inherit: Vec::new(),
+            secret_env: Vec::new(),
             run: RunSpec::Shell("cargo build --release".to_string()),
             isolation: None,
+            mode: None,
+            working_dir: None,
         };
 
         let resolved = vec![PathBuf::from("src/main.rs")];
+        let resolved_env = BTreeMap::new();
+        let secret_env = BTreeSet::new();
+        let passthrough = Vec::new();
 
         b.iter(|| {
-            let fp =
-                compute_fingerprint(tmp.path(), "build", &task, &resolved).expect("fingerprint");
+            let fp = compute_fingerprint(
+                tmp.path(),
+                "build",
+                &task,
+                &resolved,
+                &resolved_env,
+                &secret_env,
+                &passthrough,
+            )
+            .expect("fingerprint");
             black_box(fp);
         });
     });
@@ -60,8 +75,12 @@ fn task(deps: &[&str]) -> TaskSpec {
         inputs: vec!["src/main.rs".to_string()],
         outputs: vec!["dist/out".to_string()],
         env: BTreeMap::new(),
+        env_inherit: Vec::new(),
+        secret_env: Vec::new(),
         run: RunSpec::Shell("echo ok".to_string()),
         isolation: None,
+        mode: None,
+        working_dir: None,
     }
 }
 

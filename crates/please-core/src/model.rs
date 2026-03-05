@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -8,6 +9,33 @@ pub struct PleaseFile {
     pub please: PleaseSection,
     #[serde(default)]
     pub task: BTreeMap<String, TaskSpec>,
+    #[serde(default)]
+    pub alias: BTreeMap<String, String>,
+    #[serde(default)]
+    pub load_env: Vec<String>,
+}
+
+impl PleaseFile {
+    pub fn resolve_task_name(&self, input: &str) -> Result<String> {
+        if self.task.contains_key(input) {
+            return Ok(input.to_string());
+        }
+
+        let mut current = input;
+        let mut seen = std::collections::BTreeSet::new();
+
+        while let Some(next) = self.alias.get(current) {
+            if !seen.insert(current.to_string()) {
+                return Err(anyhow!("alias cycle detected while resolving '{}'", input));
+            }
+            if self.task.contains_key(next) {
+                return Ok(next.clone());
+            }
+            current = next;
+        }
+
+        Err(anyhow!("task '{}' not found", input))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -27,9 +55,17 @@ pub struct TaskSpec {
     pub outputs: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub env_inherit: Vec<String>,
+    #[serde(default)]
+    pub secret_env: Vec<String>,
     pub run: RunSpec,
     #[serde(default)]
     pub isolation: Option<IsolationMode>,
+    #[serde(default)]
+    pub mode: Option<TaskMode>,
+    #[serde(default)]
+    pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -45,6 +81,13 @@ pub enum IsolationMode {
     Strict,
     BestEffort,
     Off,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskMode {
+    Graph,
+    Interactive,
 }
 
 impl TaskSpec {
@@ -66,6 +109,14 @@ impl TaskSpec {
             RunSpec::Args(args) => {
                 args.iter().map(|part| shell_escape(part)).collect::<Vec<String>>().join(" ")
             }
+        }
+    }
+
+    pub fn inferred_mode(&self) -> TaskMode {
+        match self.mode {
+            Some(mode) => mode,
+            None if self.outputs.is_empty() => TaskMode::Interactive,
+            None => TaskMode::Graph,
         }
     }
 }

@@ -3,13 +3,16 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 
 use crate::graph::TaskGraph;
-use crate::model::PleaseFile;
+use crate::model::{PleaseFile, TaskMode};
 use crate::resolver::normalize_relative_path;
 
 pub fn validate_pleasefile(config: &PleaseFile, workspace_root: &Path) -> Result<()> {
-    if config.please.version != "0.1" && config.please.version != "0.2" {
+    if config.please.version != "0.1"
+        && config.please.version != "0.2"
+        && config.please.version != "0.3"
+    {
         return Err(anyhow!(
-            "unsupported pleasefile version '{}'; expected '0.1' or '0.2'",
+            "unsupported pleasefile version '{}'; expected '0.1', '0.2', or '0.3'",
             config.please.version
         ));
     }
@@ -17,10 +20,29 @@ pub fn validate_pleasefile(config: &PleaseFile, workspace_root: &Path) -> Result
     if config.task.is_empty() {
         return Err(anyhow!("pleasefile must define at least one task"));
     }
+    validate_aliases(config)?;
 
     for (task_name, task) in &config.task {
-        if task.outputs.is_empty() {
-            return Err(anyhow!("task '{}' must declare at least one output", task_name));
+        match task.inferred_mode() {
+            TaskMode::Graph if task.outputs.is_empty() => {
+                return Err(anyhow!(
+                    "task '{}' in graph mode must declare at least one output",
+                    task_name
+                ));
+            }
+            TaskMode::Interactive if !task.outputs.is_empty() => {
+                return Err(anyhow!(
+                    "task '{}' in interactive mode cannot declare outputs",
+                    task_name
+                ));
+            }
+            TaskMode::Interactive if !task.inputs.is_empty() => {
+                return Err(anyhow!(
+                    "task '{}' in interactive mode cannot declare inputs",
+                    task_name
+                ));
+            }
+            _ => {}
         }
 
         match &task.run {
@@ -58,10 +80,45 @@ pub fn validate_pleasefile(config: &PleaseFile, workspace_root: &Path) -> Result
                 ));
             }
         }
+
+        if let Some(dir) = &task.working_dir {
+            let _ = normalize_relative_path(dir)
+                .with_context(|| format!("task '{}' invalid working_dir '{}'", task_name, dir))?;
+        }
     }
 
     TaskGraph::build(&config.task).context("validating dependency graph")?;
 
+    Ok(())
+}
+
+fn validate_aliases(config: &PleaseFile) -> Result<()> {
+    for (alias, target) in &config.alias {
+        if config.task.contains_key(alias) {
+            return Err(anyhow!(
+                "alias '{}' shadows an existing task; alias shadowing is not allowed",
+                alias
+            ));
+        }
+        if target == alias {
+            return Err(anyhow!("alias '{}' cannot point to itself", alias));
+        }
+    }
+
+    for alias in config.alias.keys() {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut current = alias.as_str();
+        while let Some(next) = config.alias.get(current) {
+            if !seen.insert(current.to_string()) {
+                return Err(anyhow!("alias cycle detected starting at '{}'", alias));
+            }
+            current = next;
+        }
+
+        if !config.task.contains_key(current) {
+            return Err(anyhow!("alias '{}' resolves to unknown task '{}'", alias, current));
+        }
+    }
     Ok(())
 }
 
@@ -78,8 +135,12 @@ mod tests {
             inputs: vec!["src/main.rs".to_string()],
             outputs: vec!["dist/out.txt".to_string()],
             env: BTreeMap::new(),
+            env_inherit: Vec::new(),
+            secret_env: Vec::new(),
             run: RunSpec::Shell("echo hello".to_string()),
             isolation: None,
+            mode: None,
+            working_dir: None,
         }
     }
 
@@ -91,10 +152,31 @@ mod tests {
         let mut tasks = BTreeMap::new();
         tasks.insert("build".to_string(), task);
 
-        let config =
-            PleaseFile { please: PleaseSection { version: "0.2".to_string() }, task: tasks };
+        let config = PleaseFile {
+            please: PleaseSection { version: "0.2".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
 
         let result = validate_pleasefile(&config, Path::new("."));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_alias_shadowing_task() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("build".to_string(), base_task());
+        let mut alias = BTreeMap::new();
+        alias.insert("build".to_string(), "build".to_string());
+
+        let config = PleaseFile {
+            please: PleaseSection { version: "0.3".to_string() },
+            task: tasks,
+            alias,
+            load_env: Vec::new(),
+        };
+
+        assert!(validate_pleasefile(&config, Path::new(".")).is_err());
     }
 }

@@ -202,8 +202,12 @@ mod tests {
             inputs: vec!["src/main.rs".to_string()],
             outputs: vec!["dist/out.txt".to_string()],
             env: BTreeMap::new(),
+            env_inherit: Vec::new(),
+            secret_env: Vec::new(),
             run: RunSpec::Shell("echo ok".to_string()),
             isolation: None,
+            mode: None,
+            working_dir: None,
         }
     }
 

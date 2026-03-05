@@ -1,16 +1,15 @@
-[please]
-version = "0.2"
+version = "0.3"
 
-[task.a]
-deps = ["b"]
-inputs = ["src/input.txt"]
-outputs = ["dist/a.txt"]
-isolation = "best_effort"
-run = "mkdir -p dist && echo a > dist/a.txt"
+a: b
+    @in src/input.txt
+    @out dist/a.txt
+    @isolation best_effort
+    mkdir -p dist
+    cat src/input.txt > dist/a.txt
 
-[task.b]
-deps = ["a"]
-inputs = ["src/input.txt"]
-outputs = ["dist/b.txt"]
-isolation = "best_effort"
-run = "mkdir -p dist && echo b > dist/b.txt"
+b: a
+    @in src/input.txt
+    @out dist/b.txt
+    @isolation best_effort
+    mkdir -p dist
+    cat src/input.txt > dist/b.txt

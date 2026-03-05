@@ -50,3 +50,16 @@ fn test_run_missing_task_fails_with_message() {
         .failure()
         .stderr(predicate::str::contains("task 'missing_task' not found"));
 }
+
+#[test]
+fn test_run_alias_executes_target_task() {
+    let temp = support::workspace_from_fixture("basic");
+    let workspace = temp.path();
+
+    support::please_cmd(workspace)
+        .arg("run")
+        .arg("p")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("executed: process"));
+}

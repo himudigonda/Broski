@@ -1,14 +1,29 @@
-[please]
-version = "0.2"
+version = "0.3"
+alias p = process
 
-[task.process]
-inputs = ["src/input.txt"]
-outputs = ["dist/out.txt"]
-isolation = "best_effort"
-run = "mkdir -p dist && cat src/input.txt > dist/out.txt"
+process:
+    @in src/input.txt
+    @out dist/out.txt
+    @isolation best_effort
+    mkdir -p dist
+    cat src/input.txt > dist/out.txt
 
-[task.fail_midway]
-inputs = ["src/input.txt"]
-outputs = ["dist/bad.txt"]
-isolation = "best_effort"
-run = "mkdir -p dist && echo 'poison' > dist/bad.txt && exit 1"
+fail_midway:
+    @in src/input.txt
+    @out dist/bad.txt
+    @isolation best_effort
+    mkdir -p dist
+    echo 'poison' > dist/bad.txt
+    exit 1
+
+args_task:
+    @in src/input.txt
+    @out dist/args.txt
+    @isolation best_effort
+    mkdir -p dist
+    echo > dist/args.txt
+
+dev_echo:
+    @mode interactive
+    @isolation off
+    echo interactive-ok

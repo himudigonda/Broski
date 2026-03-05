@@ -91,15 +91,15 @@ fn test_explain_shows_env_change_reason() {
 
     let pleasefile = fs::read_to_string(workspace.join("pleasefile")).expect("read pleasefile");
     let with_env = pleasefile.replace(
-        "run = \"mkdir -p dist && cat src/input.txt > dist/out.txt\"",
-        "env = { MODE = \"a\" }\nrun = \"mkdir -p dist && cat src/input.txt > dist/out.txt\"",
+        "@isolation best_effort\n    mkdir -p dist",
+        "@isolation best_effort\n    @env MODE=a\n    mkdir -p dist",
     );
     fs::write(workspace.join("pleasefile"), with_env).expect("write pleasefile with env");
 
     support::please_cmd(workspace).arg("run").arg("process").assert().success();
 
     let pleasefile = fs::read_to_string(workspace.join("pleasefile")).expect("read pleasefile");
-    let changed_env = pleasefile.replace("MODE = \"a\"", "MODE = \"b\"");
+    let changed_env = pleasefile.replace("MODE=a", "MODE=b");
     fs::write(workspace.join("pleasefile"), changed_env).expect("write changed env");
 
     support::please_cmd(workspace)
@@ -109,4 +109,52 @@ fn test_explain_shows_env_change_reason() {
         .assert()
         .success()
         .stdout(predicate::str::contains("cache miss: env changed: MODE"));
+}
+
+#[test]
+fn test_explain_shows_interactive_mode_bypass_reason() {
+    let temp = support::workspace_from_fixture("basic");
+    let workspace = temp.path();
+
+    support::please_cmd(workspace)
+        .arg("run")
+        .arg("dev_echo")
+        .arg("--explain")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("interactive-ok"))
+        .stdout(predicate::str::contains("cache bypass: interactive mode"));
+}
+
+#[test]
+fn test_explain_reports_passthrough_arg_cache_delta() {
+    let temp = support::workspace_from_fixture("basic");
+    let workspace = temp.path();
+
+    support::please_cmd(workspace)
+        .arg("run")
+        .arg("args_task")
+        .arg("--")
+        .arg("alpha")
+        .assert()
+        .success();
+
+    support::please_cmd(workspace)
+        .arg("run")
+        .arg("args_task")
+        .arg("--")
+        .arg("alpha")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cache hits: args_task"));
+
+    support::please_cmd(workspace)
+        .arg("run")
+        .arg("args_task")
+        .arg("--explain")
+        .arg("--")
+        .arg("beta")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cache miss: task:passthrough_args changed"));
 }

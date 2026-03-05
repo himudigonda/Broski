@@ -1,178 +1,319 @@
 use std::collections::BTreeMap;
 
-use anyhow::{anyhow, Context, Result};
-use winnow::token::rest;
+use anyhow::{anyhow, bail, Result};
 
-use crate::model::PleaseFile;
+use crate::model::{PleaseFile, PleaseSection, RunSpec, TaskMode, TaskSpec};
 
 #[derive(Debug, Clone, Default)]
-struct AstDocument {
-    please: BTreeMap<String, toml::Value>,
-    tasks: BTreeMap<String, BTreeMap<String, toml::Value>>,
+struct TaskDraft {
+    deps: Vec<String>,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    env: BTreeMap<String, String>,
+    env_inherit: Vec<String>,
+    secret_env: Vec<String>,
+    isolation: Option<crate::model::IsolationMode>,
+    mode: Option<TaskMode>,
+    working_dir: Option<String>,
+    run_lines: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-enum Section {
-    None,
-    Please,
-    Task(String),
-}
+pub fn parse_pleasefile_dsl(content: &str) -> Result<PleaseFile> {
+    let mut version: Option<String> = None;
+    let mut aliases = BTreeMap::new();
+    let mut load_env = Vec::new();
+    let mut tasks: BTreeMap<String, TaskDraft> = BTreeMap::new();
+    let mut current_task: Option<String> = None;
 
-#[derive(Debug, Clone)]
-enum SectionHeader {
-    Please,
-    Task(String),
-}
-
-pub fn parse_pleasefile_winnow(content: &str) -> Result<PleaseFile> {
-    let mut ast = AstDocument::default();
-    let mut section = Section::None;
-
-    let mut iter = content.lines();
-    while let Some(line) = iter.next() {
+    for (line_no, raw_line) in content.lines().enumerate() {
+        let line_no = line_no + 1;
+        let line = raw_line.trim_end_matches('\r');
         let trimmed = line.trim();
+
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
 
-        if let Some(header) = parse_section_header(trimmed)? {
-            section = match header {
-                SectionHeader::Please => Section::Please,
-                SectionHeader::Task(task_name) => {
-                    ast.tasks.entry(task_name.clone()).or_default();
-                    Section::Task(task_name)
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+
+        if !current_task.as_ref().is_some_and(|_| indented) {
+            current_task = None;
+
+            if let Some(value) = parse_version_line(trimmed, line_no)? {
+                version = Some(value);
+                continue;
+            }
+
+            if let Some(path) = parse_load_line(trimmed, line_no)? {
+                load_env.push(path);
+                continue;
+            }
+
+            if let Some((alias, target)) = parse_alias_line(trimmed, line_no)? {
+                aliases.insert(alias, target);
+                continue;
+            }
+
+            if let Some((task_name, deps)) = parse_task_header(trimmed, line_no)? {
+                if tasks.contains_key(&task_name) {
+                    return Err(parse_error(line_no, 1, format!("duplicate task '{}'", task_name)));
+                }
+                tasks.insert(task_name.clone(), TaskDraft { deps, ..TaskDraft::default() });
+                current_task = Some(task_name);
+                continue;
+            }
+
+            return Err(parse_error(
+                line_no,
+                1,
+                "expected 'version = \"0.3\"', '@load', 'alias', or '<task>: ...'".to_string(),
+            ));
+        }
+
+        let task_name = current_task
+            .as_ref()
+            .ok_or_else(|| parse_error(line_no, 1, "internal parser state error".to_string()))?;
+
+        let body = trimmed;
+        let Some(task) = tasks.get_mut(task_name) else {
+            return Err(parse_error(line_no, 1, "internal parser state error".to_string()));
+        };
+
+        if let Some(rest) = body.strip_prefix("@in") {
+            let values = split_items(rest, line_no, "@in")?;
+            task.inputs.extend(values);
+            continue;
+        }
+
+        if let Some(rest) = body.strip_prefix("@out") {
+            let values = split_items(rest, line_no, "@out")?;
+            task.outputs.extend(values);
+            continue;
+        }
+
+        if let Some(rest) = body.strip_prefix("@env") {
+            let entries = split_items(rest, line_no, "@env")?;
+            for entry in entries {
+                if let Some((key, value)) = entry.split_once('=') {
+                    let key = key.trim();
+                    if key.is_empty() {
+                        return Err(parse_error(line_no, 1, "@env has empty key".to_string()));
+                    }
+                    task.env.insert(key.to_string(), value.to_string());
+                } else {
+                    task.env_inherit.push(entry);
+                }
+            }
+            continue;
+        }
+
+        if let Some(rest) = body.strip_prefix("@secret_env") {
+            let values = split_items(rest, line_no, "@secret_env")?;
+            task.secret_env.extend(values);
+            continue;
+        }
+
+        if let Some(rest) = body.strip_prefix("@dir") {
+            let values = split_items(rest, line_no, "@dir")?;
+            if values.len() != 1 {
+                return Err(parse_error(line_no, 1, "@dir accepts exactly one path".to_string()));
+            }
+            task.working_dir = Some(values[0].clone());
+            continue;
+        }
+
+        if let Some(rest) = body.strip_prefix("@mode") {
+            let values = split_items(rest, line_no, "@mode")?;
+            if values.len() != 1 {
+                return Err(parse_error(
+                    line_no,
+                    1,
+                    "@mode accepts exactly one value: graph|interactive".to_string(),
+                ));
+            }
+            task.mode = match values[0].as_str() {
+                "graph" => Some(TaskMode::Graph),
+                "interactive" => Some(TaskMode::Interactive),
+                other => {
+                    return Err(parse_error(
+                        line_no,
+                        1,
+                        format!("unknown @mode value '{}'; expected graph|interactive", other),
+                    ));
                 }
             };
             continue;
         }
 
-        let (key, mut raw_value) = parse_key_value(trimmed)?
-            .ok_or_else(|| anyhow!("invalid line in pleasefile: '{}'", line.trim()))?;
-
-        if needs_multiline_capture(&raw_value) {
-            for next_line in iter.by_ref() {
-                raw_value.push('\n');
-                raw_value.push_str(next_line);
-                if multiline_complete(&raw_value) {
-                    break;
+        if let Some(rest) = body.strip_prefix("@isolation") {
+            let values = split_items(rest, line_no, "@isolation")?;
+            if values.len() != 1 {
+                return Err(parse_error(
+                    line_no,
+                    1,
+                    "@isolation accepts exactly one value: strict|best_effort|off".to_string(),
+                ));
+            }
+            task.isolation = match values[0].as_str() {
+                "strict" => Some(crate::model::IsolationMode::Strict),
+                "best_effort" => Some(crate::model::IsolationMode::BestEffort),
+                "off" => Some(crate::model::IsolationMode::Off),
+                other => {
+                    return Err(parse_error(
+                        line_no,
+                        1,
+                        format!(
+                            "unknown @isolation value '{}'; expected strict|best_effort|off",
+                            other
+                        ),
+                    ));
                 }
-            }
+            };
+            continue;
         }
 
-        let value = parse_toml_value(&raw_value)
-            .with_context(|| format!("parsing value for key '{}'", key))?;
-
-        match &section {
-            Section::Please => {
-                ast.please.insert(key, value);
-            }
-            Section::Task(task_name) => {
-                let task = ast.tasks.entry(task_name.clone()).or_default();
-                task.insert(key, value);
-            }
-            Section::None => {
-                return Err(anyhow!("key-value pair found outside a section: '{}'", line.trim()));
-            }
-        }
+        task.run_lines.push(body.to_string());
     }
 
-    ast_to_model(ast)
+    let version = version.ok_or_else(|| {
+        parse_error(1, 1, "missing required top-level line: version = \"0.3\"".to_string())
+    })?;
+
+    if version != "0.3" {
+        bail!("DSL pleasefile requires version = \"0.3\"; found '{version}'");
+    }
+
+    if tasks.is_empty() {
+        bail!("pleasefile must define at least one task");
+    }
+
+    let mut task_specs = BTreeMap::new();
+    for (name, draft) in tasks {
+        if draft.run_lines.is_empty() {
+            bail!("task '{}' has no command lines", name);
+        }
+        task_specs.insert(
+            name,
+            TaskSpec {
+                deps: draft.deps,
+                inputs: draft.inputs,
+                outputs: draft.outputs,
+                env: draft.env,
+                env_inherit: draft.env_inherit,
+                secret_env: draft.secret_env,
+                run: RunSpec::Shell(draft.run_lines.join("\n")),
+                isolation: draft.isolation,
+                mode: draft.mode,
+                working_dir: draft.working_dir,
+            },
+        );
+    }
+
+    Ok(PleaseFile { please: PleaseSection { version }, task: task_specs, alias: aliases, load_env })
 }
 
-fn ast_to_model(ast: AstDocument) -> Result<PleaseFile> {
-    let mut root = toml::map::Map::new();
+fn split_items(rest: &str, line_no: usize, directive: &str) -> Result<Vec<String>> {
+    let values: Vec<String> = rest
+        .split_whitespace()
+        .map(|value| value.trim_matches('"').trim_matches('\'').to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
 
-    let mut please_table = toml::map::Map::new();
-    for (key, value) in ast.please {
-        please_table.insert(key, value);
+    if values.is_empty() {
+        return Err(parse_error(line_no, 1, format!("{} requires at least one value", directive)));
     }
-    root.insert("please".to_string(), toml::Value::Table(please_table));
 
-    let mut tasks_table = toml::map::Map::new();
-    for (task_name, values) in ast.tasks {
-        let mut entry_table = toml::map::Map::new();
-        for (key, value) in values {
-            entry_table.insert(key, value);
-        }
-        tasks_table.insert(task_name, toml::Value::Table(entry_table));
-    }
-    root.insert("task".to_string(), toml::Value::Table(tasks_table));
-
-    toml::Value::Table(root).try_into().context("mapping winnow AST into PleaseFile model")
+    Ok(values)
 }
 
-fn parse_section_header(input_line: &str) -> Result<Option<SectionHeader>> {
-    if !input_line.starts_with('[') {
+fn parse_version_line(line: &str, line_no: usize) -> Result<Option<String>> {
+    if !line.starts_with("version") {
         return Ok(None);
     }
 
-    if !input_line.ends_with(']') {
-        return Err(anyhow!("invalid section header '{}': missing closing ']'", input_line));
+    let Some((left, right)) = line.split_once('=') else {
+        return Err(parse_error(
+            line_no,
+            1,
+            "invalid version declaration; expected version = \"0.3\"".to_string(),
+        ));
+    };
+
+    if left.trim() != "version" {
+        return Ok(None);
     }
-    let body = input_line[1..input_line.len() - 1].trim();
-    if body.is_empty() {
-        return Err(anyhow!("invalid section header '{}': empty body", input_line));
+
+    let raw = right.trim();
+    let value = raw.trim_matches('"');
+    Ok(Some(value.to_string()))
+}
+
+fn parse_load_line(line: &str, line_no: usize) -> Result<Option<String>> {
+    let Some(rest) = line.strip_prefix("@load") else {
+        return Ok(None);
+    };
+    let values = split_items(rest, line_no, "@load")?;
+    if values.len() != 1 {
+        return Err(parse_error(line_no, 1, "@load accepts exactly one file path".to_string()));
     }
-    if body.contains('[') || body.contains(']') {
-        return Err(anyhow!(
-            "invalid section header '{}': unexpected trailing content",
-            input_line
+    Ok(Some(values[0].clone()))
+}
+
+fn parse_alias_line(line: &str, line_no: usize) -> Result<Option<(String, String)>> {
+    let Some(rest) = line.strip_prefix("alias ") else {
+        return Ok(None);
+    };
+
+    let Some((name, target)) = rest.split_once('=') else {
+        return Err(parse_error(
+            line_no,
+            1,
+            "invalid alias; expected: alias <name> = <target>".to_string(),
+        ));
+    };
+
+    let name = name.trim();
+    let target = target.trim();
+    if name.is_empty() || target.is_empty() {
+        return Err(parse_error(
+            line_no,
+            1,
+            "invalid alias; name/target cannot be empty".to_string(),
         ));
     }
 
-    if body == "please" {
-        return Ok(Some(SectionHeader::Please));
-    }
-
-    if let Some(task_name) = body.strip_prefix("task.") {
-        if task_name.is_empty() {
-            return Err(anyhow!("task section must include a task name"));
-        }
-        return Ok(Some(SectionHeader::Task(task_name.to_string())));
-    }
-
-    Err(anyhow!("unknown section header '[{}]'", body))
+    Ok(Some((name.to_string(), target.to_string())))
 }
 
-fn parse_key_value(line: &str) -> Result<Option<(String, String)>> {
-    if line.starts_with('[') {
+fn parse_task_header(line: &str, line_no: usize) -> Result<Option<(String, Vec<String>)>> {
+    let Some((name, deps_raw)) = line.split_once(':') else {
         return Ok(None);
-    }
-
-    let Some((raw_key, raw_value)) = line.split_once('=') else {
-        return Err(anyhow!("invalid key-value line '{}': missing '='", line));
     };
 
-    let key = raw_key.trim();
-    if key.is_empty() {
-        return Err(anyhow!("invalid key-value line '{}': missing key", line));
-    }
-    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(anyhow!("invalid key-value line '{}': unexpected key content", line));
+    let task_name = name.trim();
+    if task_name.is_empty() {
+        return Err(parse_error(line_no, 1, "task name cannot be empty".to_string()));
     }
 
-    let mut value_input = raw_value;
-    let value: &str = rest::<_, winnow::error::ContextError>(&mut value_input)
-        .map_err(|_| anyhow!("invalid key-value line '{}': missing value", line))?;
+    if !is_identifier(task_name) {
+        return Err(parse_error(line_no, 1, format!("invalid task identifier '{}'", task_name)));
+    }
 
-    Ok(Some((key.to_string(), value.trim().to_string())))
+    let deps = deps_raw
+        .split_whitespace()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+
+    Ok(Some((task_name.to_string(), deps)))
 }
 
-fn parse_toml_value(raw: &str) -> Result<toml::Value> {
-    let snippet = format!("value = {}", raw);
-    let parsed: toml::Value = toml::from_str(&snippet).context("parsing TOML value expression")?;
-    parsed
-        .get("value")
-        .cloned()
-        .ok_or_else(|| anyhow!("value expression did not produce a TOML value"))
+fn is_identifier(value: &str) -> bool {
+    value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
-fn needs_multiline_capture(raw_value: &str) -> bool {
-    raw_value.trim_start().starts_with("\"\"\"") && !multiline_complete(raw_value)
-}
-
-fn multiline_complete(raw_value: &str) -> bool {
-    raw_value.matches("\"\"\"").count() >= 2
+fn parse_error(line: usize, column: usize, message: String) -> anyhow::Error {
+    anyhow!("DSL parse error at {}:{}: {}", line, column, message)
 }
 
 #[cfg(test)]
@@ -182,40 +323,61 @@ mod tests {
     #[test]
     fn parses_basic_document() {
         let input = r#"
-            [please]
-            version = "0.2"
+            version = "0.3"
+            @load .env
+            alias b = build
 
-            [task.build]
-            deps = ["prep"]
-            inputs = ["src/main.rs"]
-            outputs = ["dist/out"]
-            env = { MODE = "dev" }
-            run = "echo hi"
+            build: prep
+                @in src/**/*.rs Cargo.toml
+                @out dist/out.txt
+                @env MODE=dev
+                @env PATH
+                @secret_env API_KEY
+                @dir crates/please-core
+                @mode graph
+                @isolation off
+                cargo build --release
+
+            prep:
+                echo prep
         "#;
 
-        let parsed = parse_pleasefile_winnow(input).expect("parse with winnow");
-        assert_eq!(parsed.please.version, "0.2");
-        assert!(parsed.task.contains_key("build"));
+        let parsed = parse_pleasefile_dsl(input).expect("parse DSL");
+        assert_eq!(parsed.please.version, "0.3");
+        assert_eq!(parsed.load_env, vec![".env".to_string()]);
+        assert_eq!(parsed.alias.get("b"), Some(&"build".to_string()));
+        let build = parsed.task.get("build").expect("build task");
+        assert_eq!(build.inputs.len(), 2);
+        assert_eq!(build.outputs.len(), 1);
+        assert_eq!(build.env.get("MODE"), Some(&"dev".to_string()));
+        assert!(build.env_inherit.contains(&"PATH".to_string()));
+        assert!(build.secret_env.contains(&"API_KEY".to_string()));
+        assert_eq!(build.mode, Some(TaskMode::Graph));
+        assert_eq!(build.isolation, Some(crate::model::IsolationMode::Off));
     }
 
     #[test]
-    fn parses_multiline_run_block() {
+    fn rejects_invalid_mode() {
         let input = r#"
-            [please]
-            version = "0.2"
-
-            [task.echo]
-            inputs = ["src/main.rs"]
-            outputs = ["dist/out.txt"]
-            run = """
-              echo hello
-              echo world
-            """
+            version = "0.3"
+            dev:
+                @mode invalid
+                echo hi
         "#;
 
-        let parsed = parse_pleasefile_winnow(input).expect("parse with winnow");
-        let run = parsed.task.get("echo").expect("task echo").run_as_shell();
-        assert!(run.contains("echo hello"));
-        assert!(run.contains("echo world"));
+        let error = parse_pleasefile_dsl(input).expect_err("invalid mode should fail");
+        assert!(error.to_string().contains("unknown @mode value"));
+    }
+
+    #[test]
+    fn requires_version_03_for_dsl() {
+        let input = r#"
+            version = "0.2"
+            dev:
+                echo hi
+        "#;
+
+        let error = parse_pleasefile_dsl(input).expect_err("version mismatch should fail");
+        assert!(error.to_string().contains("requires version"));
     }
 }

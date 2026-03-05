@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -20,7 +20,7 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::fingerprint::compute_fingerprint;
 use crate::graph::TaskGraph;
-use crate::model::{IsolationMode, PleaseFile, TaskSpec};
+use crate::model::{IsolationMode, PleaseFile, TaskMode, TaskSpec};
 use crate::resolver::{normalize_relative_path, resolve_inputs};
 use crate::runtime::{acquire_runtime_lock, sweep_runtime_state, RuntimeLockGuard};
 
@@ -32,6 +32,7 @@ pub struct RunOptions {
     pub explain: bool,
     pub force_isolation: bool,
     pub jobs: usize,
+    pub passthrough_args: Vec<String>,
 }
 
 impl Default for RunOptions {
@@ -43,6 +44,7 @@ impl Default for RunOptions {
             explain: false,
             force_isolation: false,
             jobs: num_cpus::get().max(1),
+            passthrough_args: Vec::new(),
         }
     }
 }
@@ -82,6 +84,7 @@ pub struct Executor {
     config: PleaseFile,
     graph: TaskGraph,
     store: Arc<dyn ArtifactStore>,
+    loaded_env: BTreeMap<String, String>,
     _lock_guard: RuntimeLockGuard,
 }
 
@@ -92,6 +95,7 @@ impl Executor {
         store: Arc<dyn ArtifactStore>,
     ) -> Result<Self> {
         let workspace_root = workspace_root.as_ref().to_path_buf();
+        let loaded_env = load_env_files(&workspace_root, &config.load_env)?;
         let sweep = sweep_runtime_state(&workspace_root, true)?;
         if sweep.active_lock_detected {
             return Err(anyhow!("another Please execution is active; aborting startup sweep"));
@@ -99,7 +103,7 @@ impl Executor {
         let lock_guard = acquire_runtime_lock(&workspace_root)?;
         let graph = TaskGraph::build(&config.task)?;
 
-        Ok(Self { workspace_root, config, graph, store, _lock_guard: lock_guard })
+        Ok(Self { workspace_root, config, graph, store, loaded_env, _lock_guard: lock_guard })
     }
 
     pub fn graph(&self) -> &TaskGraph {
@@ -117,7 +121,8 @@ impl Executor {
                 .context("--force-isolation requires bubblewrap (`bwrap`) on PATH")?;
         }
 
-        let layers = self.graph.layers_for_target(target)?;
+        let resolved_target = self.config.resolve_task_name(target)?;
+        let layers = self.graph.layers_for_target(&resolved_target)?;
         let mut summary = RunSummary::default();
         let progress_enabled = io::stderr().is_terminal();
         let mut renderer: Option<thread::JoinHandle<()>> = None;
@@ -136,8 +141,24 @@ impl Executor {
 
         for mut layer in layers {
             layer.sort();
-            let outcomes: Vec<Result<TaskOutcome>> = pool.install(|| {
-                layer
+            let mut graph_tasks = Vec::new();
+            let mut interactive_tasks = Vec::new();
+
+            for task_name in layer {
+                let task = self
+                    .config
+                    .task
+                    .get(&task_name)
+                    .ok_or_else(|| anyhow!("task '{}' not found", task_name))?;
+                if task.inferred_mode() == TaskMode::Interactive {
+                    interactive_tasks.push(task_name);
+                } else {
+                    graph_tasks.push(task_name);
+                }
+            }
+
+            let graph_outcomes: Vec<Result<TaskOutcome>> = pool.install(|| {
+                graph_tasks
                     .par_iter()
                     .map(|task_name| {
                         self.execute_task(task_name, options, progress_sender.as_ref().cloned())
@@ -145,7 +166,7 @@ impl Executor {
                     .collect()
             });
 
-            for outcome in outcomes {
+            for outcome in graph_outcomes {
                 let outcome = match outcome {
                     Ok(value) => value,
                     Err(error) => {
@@ -156,17 +177,13 @@ impl Executor {
                         return Err(error);
                     }
                 };
-                let task_name = outcome.task_name.clone();
-                if outcome.dry_run {
-                    summary.dry_run.push(task_name.clone());
-                } else if outcome.from_cache {
-                    summary.cache_hits.push(task_name.clone());
-                } else {
-                    summary.executed.push(task_name.clone());
-                }
-                if !outcome.cache_miss_reasons.is_empty() {
-                    summary.cache_miss_reasons.insert(task_name, outcome.cache_miss_reasons);
-                }
+                apply_outcome(&mut summary, outcome);
+            }
+
+            for task_name in interactive_tasks {
+                let outcome =
+                    self.execute_task(&task_name, options, progress_sender.as_ref().cloned())?;
+                apply_outcome(&mut summary, outcome);
             }
         }
 
@@ -190,11 +207,63 @@ impl Executor {
             .task
             .get(task_name)
             .ok_or_else(|| anyhow!("task '{}' not found", task_name))?;
+        let task_mode = task.inferred_mode();
+        let (resolved_env, secret_env_keys) = self.resolve_task_env(task)?;
+
+        if task_mode == TaskMode::Interactive {
+            if options.force_isolation {
+                return Err(anyhow!(
+                    "--force-isolation is not supported for interactive task '{}'",
+                    task_name
+                ));
+            }
+
+            if options.dry_run {
+                emit_progress(
+                    &progress,
+                    ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::DryRun),
+                );
+                return Ok(TaskOutcome {
+                    task_name: task_name.to_string(),
+                    from_cache: false,
+                    dry_run: true,
+                    cache_miss_reasons: if options.explain {
+                        vec!["cache bypass: interactive mode".to_string()]
+                    } else {
+                        Vec::new()
+                    },
+                });
+            }
+
+            self.run_interactive_command(task_name, task, &resolved_env, options)
+                .with_context(|| format!("executing interactive task '{}'", task_name))?;
+            emit_progress(
+                &progress,
+                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Executed),
+            );
+            return Ok(TaskOutcome {
+                task_name: task_name.to_string(),
+                from_cache: false,
+                dry_run: false,
+                cache_miss_reasons: if options.explain {
+                    vec!["cache bypass: interactive mode".to_string()]
+                } else {
+                    Vec::new()
+                },
+            });
+        }
 
         let outputs = normalize_outputs(task)?;
         let inputs = resolve_inputs(&self.workspace_root, &task.inputs)?;
-        let fingerprint_result =
-            compute_fingerprint(&self.workspace_root, task_name, task, &inputs)?;
+        let fingerprint_result = compute_fingerprint(
+            &self.workspace_root,
+            task_name,
+            task,
+            &inputs,
+            &resolved_env,
+            &secret_env_keys,
+            &options.passthrough_args,
+        )?;
         let mut cache_miss_reasons = Vec::new();
 
         if !options.force && !options.no_cache {
@@ -257,7 +326,7 @@ impl Executor {
 
         let stage = self.create_stage_snapshot(task_name)?;
         let output = self
-            .run_task_command(task_name, task, stage.path(), options)
+            .run_task_command(task_name, task, stage.path(), &resolved_env, options)
             .with_context(|| format!("executing task '{}'", task_name))?;
 
         if !output.status.success() {
@@ -349,9 +418,11 @@ impl Executor {
         _task_name: &str,
         task: &TaskSpec,
         stage_workspace: &Path,
+        resolved_env: &BTreeMap<String, String>,
         options: &RunOptions,
     ) -> Result<Output> {
         let isolation_mode = selected_isolation(task, options);
+        let shell_command = build_shell_command(task, &options.passthrough_args);
 
         let mut command = match isolation_mode {
             IsolationMode::Strict if cfg!(target_os = "linux") => {
@@ -378,7 +449,7 @@ impl Executor {
                     .arg(stage_workspace)
                     .arg("/bin/sh")
                     .arg("-lc")
-                    .arg(task.run_as_shell());
+                    .arg(&shell_command);
                 cmd
             }
             IsolationMode::Strict => {
@@ -388,12 +459,12 @@ impl Executor {
             }
             IsolationMode::BestEffort | IsolationMode::Off => {
                 let mut cmd = Command::new("/bin/sh");
-                cmd.arg("-lc").arg(task.run_as_shell());
+                cmd.arg("-lc").arg(&shell_command);
                 cmd
             }
         };
 
-        command.current_dir(stage_workspace);
+        command.current_dir(resolve_execution_dir(stage_workspace, task.working_dir.as_deref())?);
 
         match isolation_mode {
             IsolationMode::Strict | IsolationMode::BestEffort => {
@@ -407,11 +478,74 @@ impl Executor {
             IsolationMode::Off => {}
         }
 
-        for (key, value) in &task.env {
+        for (key, value) in resolved_env {
             command.env(key, value);
         }
 
-        command.output().with_context(|| format!("spawning task command '{}'", task.run_as_shell()))
+        command.output().with_context(|| format!("spawning task command '{}'", shell_command))
+    }
+
+    fn run_interactive_command(
+        &self,
+        task_name: &str,
+        task: &TaskSpec,
+        resolved_env: &BTreeMap<String, String>,
+        options: &RunOptions,
+    ) -> Result<()> {
+        let shell_command = build_shell_command(task, &options.passthrough_args);
+        println!("[{task_name}] $ {shell_command}");
+
+        let mut command = Command::new("/bin/sh");
+        command.arg("-lc").arg(&shell_command);
+        command
+            .current_dir(resolve_execution_dir(&self.workspace_root, task.working_dir.as_deref())?);
+        command.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+        for (key, value) in resolved_env {
+            command.env(key, value);
+        }
+
+        let status = command
+            .status()
+            .with_context(|| format!("spawning interactive task command '{}'", shell_command))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("interactive task '{}' failed with status {}", task_name, status))
+        }
+    }
+
+    fn resolve_task_env(
+        &self,
+        task: &TaskSpec,
+    ) -> Result<(BTreeMap<String, String>, BTreeSet<String>)> {
+        let mut resolved = BTreeMap::new();
+        let mut secret_keys = BTreeSet::new();
+        let host_env: BTreeMap<String, String> = env::vars().collect();
+
+        let mut inherit = BTreeSet::new();
+        inherit.extend(task.env_inherit.iter().cloned());
+        inherit.extend(task.secret_env.iter().cloned());
+
+        for key in inherit {
+            let value = self
+                .loaded_env
+                .get(&key)
+                .cloned()
+                .or_else(|| host_env.get(&key).cloned())
+                .ok_or_else(|| anyhow!("environment variable '{}' is required but missing", key))?;
+            resolved.insert(key, value);
+        }
+
+        for (key, value) in &task.env {
+            resolved.insert(key.clone(), value.clone());
+        }
+
+        for key in &task.secret_env {
+            secret_keys.insert(key.clone());
+        }
+
+        Ok((resolved, secret_keys))
     }
 
     fn promote_outputs(&self, stage_workspace: &Path, outputs: &[PathBuf]) -> Result<()> {
@@ -552,6 +686,84 @@ fn selected_isolation(task: &TaskSpec, options: &RunOptions) -> IsolationMode {
     } else {
         task.effective_isolation()
     }
+}
+
+fn apply_outcome(summary: &mut RunSummary, outcome: TaskOutcome) {
+    let task_name = outcome.task_name.clone();
+    if outcome.dry_run {
+        summary.dry_run.push(task_name.clone());
+    } else if outcome.from_cache {
+        summary.cache_hits.push(task_name.clone());
+    } else {
+        summary.executed.push(task_name.clone());
+    }
+    if !outcome.cache_miss_reasons.is_empty() {
+        summary.cache_miss_reasons.insert(task_name, outcome.cache_miss_reasons);
+    }
+}
+
+fn build_shell_command(task: &TaskSpec, passthrough_args: &[String]) -> String {
+    let mut command = task.run_as_shell();
+    if !passthrough_args.is_empty() {
+        let joined = passthrough_args
+            .iter()
+            .map(|part| shell_escape(part))
+            .collect::<Vec<String>>()
+            .join(" ");
+        command.push(' ');
+        command.push_str(&joined);
+    }
+    command
+}
+
+fn shell_escape(input: &str) -> String {
+    if input.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+    {
+        return input.to_string();
+    }
+    format!("'{}'", input.replace('\'', "'\"'\"'"))
+}
+
+fn resolve_execution_dir(root: &Path, working_dir: Option<&str>) -> Result<PathBuf> {
+    let Some(dir) = working_dir else {
+        return Ok(root.to_path_buf());
+    };
+    let normalized = normalize_relative_path(dir)?;
+    Ok(root.join(normalized))
+}
+
+fn load_env_files(workspace_root: &Path, files: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut env_map = BTreeMap::new();
+    for file in files {
+        let rel = normalize_relative_path(file)
+            .with_context(|| format!("invalid @load path '{}'", file))?;
+        let path = workspace_root.join(rel);
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("reading env file '{}'", path.display()))?;
+        for (idx, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once('=') else {
+                return Err(anyhow!(
+                    "invalid env line in '{}':{}; expected KEY=VALUE",
+                    path.display(),
+                    idx + 1
+                ));
+            };
+            let key = key.trim();
+            if key.is_empty() {
+                return Err(anyhow!(
+                    "invalid env key in '{}':{}; key cannot be empty",
+                    path.display(),
+                    idx + 1
+                ));
+            }
+            env_map.insert(key.to_string(), value.trim().to_string());
+        }
+    }
+    Ok(env_map)
 }
 
 fn normalize_outputs(task: &TaskSpec) -> Result<Vec<PathBuf>> {
@@ -744,6 +956,9 @@ fn describe_manifest_change(action: &str, key: &str) -> String {
     if let Some(name) = key.strip_prefix("env:") {
         return format!("cache miss: env {action}: {name}");
     }
+    if key.starts_with("secret_env:") {
+        return "cache miss: secret env changed".to_string();
+    }
     if let Some(pattern) = key.strip_prefix("input_pattern:") {
         return format!("cache miss: input pattern {action}: {pattern}");
     }
@@ -783,8 +998,12 @@ mod tests {
             inputs: vec!["src/input.txt".to_string()],
             outputs: vec!["dist/output.txt".to_string()],
             env: BTreeMap::new(),
+            env_inherit: Vec::new(),
+            secret_env: Vec::new(),
             run: RunSpec::Shell(command.to_string()),
             isolation: Some(IsolationMode::BestEffort),
+            mode: Some(TaskMode::Graph),
+            working_dir: None,
         }
     }
 
@@ -805,8 +1024,12 @@ mod tests {
         let mut tasks = BTreeMap::new();
         tasks.insert("build".to_string(), simple_task("echo broken > dist/output.txt && exit 42"));
 
-        let config =
-            PleaseFile { please: PleaseSection { version: "0.2".to_string() }, task: tasks };
+        let config = PleaseFile {
+            please: PleaseSection { version: "0.2".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
 
         let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
         let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
@@ -935,15 +1158,23 @@ mod tests {
                 inputs: vec!["src/input.txt".to_string()],
                 outputs: vec!["dist/output.txt".to_string()],
                 env: BTreeMap::new(),
+                env_inherit: Vec::new(),
+                secret_env: Vec::new(),
                 run: RunSpec::Shell(
                     "mkdir -p dist && cp src/input.txt dist/output.txt".to_string(),
                 ),
                 isolation: Some(IsolationMode::Strict),
+                mode: Some(TaskMode::Graph),
+                working_dir: None,
             },
         );
 
-        let config =
-            PleaseFile { please: PleaseSection { version: "0.2".to_string() }, task: tasks };
+        let config = PleaseFile {
+            please: PleaseSection { version: "0.2".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
         let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
         let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
 
@@ -970,15 +1201,23 @@ mod tests {
                 inputs: vec!["src/input.txt".to_string()],
                 outputs: vec!["dist/output.txt".to_string()],
                 env: BTreeMap::new(),
+                env_inherit: Vec::new(),
+                secret_env: Vec::new(),
                 run: RunSpec::Shell(
                     "mkdir -p dist && cp src/input.txt dist/output.txt".to_string(),
                 ),
                 isolation: Some(IsolationMode::Off),
+                mode: Some(TaskMode::Graph),
+                working_dir: None,
             },
         );
 
-        let config =
-            PleaseFile { please: PleaseSection { version: "0.2".to_string() }, task: tasks };
+        let config = PleaseFile {
+            please: PleaseSection { version: "0.2".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
         let cache = LocalArtifactStore::new(workspace.join(".please/cache")).expect("create cache");
         let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
 

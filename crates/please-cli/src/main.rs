@@ -38,6 +38,8 @@ enum Command {
         force_isolation: bool,
         #[arg(long)]
         jobs: Option<usize>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     List,
     Graph {
@@ -94,25 +96,29 @@ fn run() -> Result<()> {
             for task in graph.all_tasks_sorted() {
                 println!("{task}");
             }
+            for (alias, target) in &config.alias {
+                println!("alias {alias} -> {target}");
+            }
             Ok(())
         }
         Command::Graph { task, format } => {
             let config = load_and_validate(&workspace)?;
             let graph = TaskGraph::build(&config.task)?;
+            let resolved_task = config.resolve_task_name(&task)?;
             match format {
                 GraphFormat::Text => {
-                    let layers = graph.layers_for_target(&task)?;
+                    let layers = graph.layers_for_target(&resolved_task)?;
                     for (index, layer) in layers.iter().enumerate() {
                         println!("layer {}: {}", index, layer.join(", "));
                     }
                 }
                 GraphFormat::Dot => {
-                    println!("{}", graph.dot_for_target(&task)?);
+                    println!("{}", graph.dot_for_target(&resolved_task)?);
                 }
             }
             Ok(())
         }
-        Command::Run { task, dry_run, explain, force, no_cache, force_isolation, jobs } => {
+        Command::Run { task, dry_run, explain, force, no_cache, force_isolation, jobs, args } => {
             let config = load_and_validate(&workspace)?;
             let cache = LocalArtifactStore::new(cache_root(&workspace))?;
             let executor = Executor::new(&workspace, config, Arc::new(cache))?;
@@ -123,6 +129,7 @@ fn run() -> Result<()> {
                 force,
                 no_cache,
                 force_isolation,
+                passthrough_args: args,
                 ..RunOptions::default()
             };
             if let Some(j) = jobs {
@@ -326,13 +333,13 @@ mod tests {
         fs::write(
             workspace.join("pleasefile"),
             r#"
-                [please]
-                version = "0.2"
+                version = "0.3"
 
-                [task.example]
-                inputs = ["src/input.txt"]
-                outputs = ["dist/out.txt"]
-                run = "echo test > dist/out.txt"
+                example:
+                    @in src/input.txt
+                    @out dist/out.txt
+                    @isolation off
+                    echo test > dist/out.txt
             "#,
         )
         .expect("write pleasefile");
@@ -354,6 +361,29 @@ mod tests {
                 assert!(effective_repair);
             }
             _ => panic!("expected doctor command"),
+        }
+    }
+
+    #[test]
+    fn parses_passthrough_args() {
+        let cli = Cli::try_parse_from([
+            "please",
+            "--workspace",
+            ".",
+            "run",
+            "test",
+            "--",
+            "--watch",
+            "--grep",
+            "slow suite",
+        ])
+        .expect("parse cli");
+
+        match cli.command {
+            Command::Run { args, .. } => {
+                assert_eq!(args, vec!["--watch", "--grep", "slow suite"]);
+            }
+            _ => panic!("expected run command"),
         }
     }
 }
