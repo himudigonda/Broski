@@ -1,4 +1,4 @@
-version = "0.4"
+version = "0.5"
 
 build_ui:
     @in frontend/package.json frontend/package-lock.json frontend/index.html frontend/src/**/* frontend/tsconfig.json frontend/vite.config.ts

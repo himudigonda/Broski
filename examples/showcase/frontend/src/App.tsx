@@ -51,7 +51,7 @@ export function App() {
   return (
     <main className="page">
       <header className="hero">
-        <p className="eyebrow">Please v0.4.0-rc.1 Showcase</p>
+        <p className="eyebrow">Please v0.5.0 Showcase</p>
         <h1>Build Graph Telemetry Dashboard</h1>
         <p>{summary}</p>
       </header>

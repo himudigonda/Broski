@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (for example: v0.4.0 or v0.4.0-rc.1)"
+        description: "Tag to release (for example: v0.5.0)"
         required: true
         type: string
 
@@ -26,8 +26,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            binary_name: please
+            archive_ext: tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
+            binary_name: please
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: please.exe
+            archive_ext: zip
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -42,17 +50,34 @@ jobs:
       - name: Build release binary
         run: cargo build --release -p please-cli --target ${{ matrix.target }}
 
-      - name: Package artifact
+      - name: Package artifact (Linux/macOS)
+        if: matrix.os != 'windows-latest'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          bin_path="target/${TARGET}/release/please"
-          asset="please-${RELEASE_TAG}-${TARGET}.tar.gz"
+          bin_path="target/${TARGET}/release/${BINARY_NAME}"
+          asset="please-${RELEASE_TAG}-${TARGET}.${ARCHIVE_EXT}"
           tar -C "$(dirname "$bin_path")" -czf "dist/${asset}" "$(basename "$bin_path")"
           echo "created dist/${asset}"
+
+      - name: Package artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $binPath = "target/$env:TARGET/release/$env:BINARY_NAME"
+          $asset = "please-$env:RELEASE_TAG-$env:TARGET.$env:ARCHIVE_EXT"
+          Compress-Archive -Path $binPath -DestinationPath "dist/$asset" -Force
+          Write-Host "created dist/$asset"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -77,7 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum please-*.tar.gz > SHA256SUMS.txt
+          sha256sum please-* > SHA256SUMS.txt
 
       - name: Create or update release
         uses: softprops/action-gh-release@v2
@@ -89,5 +114,5 @@ jobs:
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           fail_on_unmatched_files: true
           files: |
-            dist/please-*.tar.gz
+            dist/please-*
             dist/SHA256SUMS.txt

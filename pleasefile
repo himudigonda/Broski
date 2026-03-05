@@ -1,4 +1,4 @@
-version = "0.4"
+version = "0.5"
 
 fmt:
     @in Cargo.toml Cargo.lock rustfmt.toml crates/**/*.rs

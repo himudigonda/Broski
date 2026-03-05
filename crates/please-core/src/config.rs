@@ -48,7 +48,7 @@ fn parse_pleasefile_with_mode_at(
         ParserMode::Toml => parse_toml(content),
         ParserMode::Dsl => {
             let parsed = parse_pleasefile_dsl_with_workspace(content, workspace_root)?;
-            warn_dsl_03_deprecated_if_needed(&parsed);
+            warn_dsl_deprecated_if_needed(&parsed);
             Ok(parsed)
         }
         ParserMode::Auto => {
@@ -57,7 +57,7 @@ fn parse_pleasefile_with_mode_at(
                 parse_toml(content)
             } else {
                 let parsed = parse_pleasefile_dsl_with_workspace(content, workspace_root)?;
-                warn_dsl_03_deprecated_if_needed(&parsed);
+                warn_dsl_deprecated_if_needed(&parsed);
                 Ok(parsed)
             }
         }
@@ -89,12 +89,20 @@ fn warn_toml_deprecated() {
     });
 }
 
-fn warn_dsl_03_deprecated_if_needed(parsed: &PleaseFile) {
+fn warn_dsl_deprecated_if_needed(parsed: &PleaseFile) {
+    static WARN_03: Once = Once::new();
+    static WARN_04: Once = Once::new();
+
     if parsed.please.version == "0.3" {
-        static WARN_ONCE: Once = Once::new();
-        WARN_ONCE.call_once(|| {
+        WARN_03.call_once(|| {
             eprintln!(
                 "warning: pleasefile DSL version \"0.3\" is deprecated; migrate to version = \"0.5\" before v0.6"
+            );
+        });
+    } else if parsed.please.version == "0.4" {
+        WARN_04.call_once(|| {
+            eprintln!(
+                "warning: pleasefile DSL version \"0.4\" is deprecated; migrate to version = \"0.5\" before v0.6"
             );
         });
     }

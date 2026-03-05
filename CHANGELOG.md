@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.0] - 2026-03-05
+
+### Added
+- First-class DSL task parameters:
+  - `task [arg] [arg="default"]`.
+- `@import` directive with circular import detection and depth guardrails.
+- Name-collision protection across imported task/alias/variable declarations.
+- Shebang task execution with temporary script lifecycle cleanup.
+- Cross-platform shell command resolution:
+  - POSIX `/bin/sh` on Unix.
+  - `pwsh` first, `cmd` fallback on Windows.
+- Decorators:
+  - `@private` to hide tasks from `please list`.
+  - `@confirm` to require explicit user confirmation before execution.
+- Built-in interpolation functions:
+  - `{{ os() }}`, `{{ arch() }}`, `{{ env("KEY", "default") }}`.
+- Release matrix now publishes Windows artifact (`x86_64-pc-windows-msvc`).
+
+### Changed
+- Workspace and crate version bumped to `0.5.0`.
+- Root and all `examples/**/pleasefile` files migrated to `version = "0.5"`.
+- CLI parser + diagnostics now surface richer miette-backed source-span errors.
+- Release/CI docs and runbook updated for stable `v0.5.0`.
+
+### Compatibility
+- TOML and DSL `0.3`/`0.4` continue to work in v0.5 with deprecation warnings.
+- Legacy format removal target moved to v0.6.
+
 ## [0.4.0-rc.1] - 2026-03-05
 
 ### Added

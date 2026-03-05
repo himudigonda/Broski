@@ -1,94 +1,89 @@
 # Please
 
-`Please` is a deterministic task runner for polyglot projects.
+`Please` is a deterministic task runner and build orchestrator designed to replace `make` and `just` for local, CI, and mid-size polyglot projects.
 
 ## Status
-- Stable channel: `v0.2.0`
-- Current prerelease: `v0.4.0-rc.1` (Intelligence + Ergonomics)
+- Stable: `v0.5.0`
+- Compatibility retained in v0.5: DSL `0.3`/`0.4` and TOML (deprecated, removal target `v0.6`)
 
 ## Why Please
-- Content-hash invalidation (BLAKE3), not mtime heuristics.
-- DAG-aware parallel scheduling.
-- Transactional output promotion.
-- Local CAS + SQLite execution metadata.
-- Explainable cache misses via `--explain`.
+- Content-based invalidation (BLAKE3), not mtime heuristics.
+- DAG scheduling for parallel graph tasks.
 - Interactive mode for dev servers and ad-hoc commands.
+- Transactional output promotion (ACID-safe output handling).
+- Cache telemetry with `--explain`.
 
 ## Install
-Supported binaries:
+Published artifacts:
 - `x86_64-unknown-linux-gnu`
 - `aarch64-apple-darwin`
+- `x86_64-pc-windows-msvc`
 
 Install latest stable (default):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | bash
 ```
 
-Install a pinned beta:
+Install a pinned version:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | PLEASE_VERSION=v0.4.0-rc.1 bash
+curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | PLEASE_VERSION=v0.5.0 bash
 ```
 
 ## CLI quickstart
 ```bash
 please --workspace . list
-please --workspace . run ci
 please --workspace . ci
 please --workspace . run ci --explain
+please --workspace . run test --watch
 please --workspace . graph ci --format text
-please --workspace . run test -- --watch
 ```
 
-## v0.4 DSL quickstart
-Create a `pleasefile`:
+## v0.5 DSL quickstart
 ```text
-version = "0.4"
+version = "0.5"
 alias b = build
-RUST_TARGET = "target/release/app"
 
-# Build release artifact
-build:
+# Reusable task with params
+build [target] [mode="release"]:
     @in src/**/* Cargo.toml
-    @out {{ RUST_TARGET }}
+    @out dist/{{ target }}
     @requires cargo
     @isolation off
-    cargo build --release && cp target/release/app {{ RUST_TARGET }}
+    cargo build --bin {{ target }} --{{ mode }}
+    cp target/{{ mode }}/{{ target }} dist/{{ target }}
 
-dev:
+# Hidden helper
+internal_clean:
+    @private
+    rm -rf dist
+
+# Guarded deploy
+publish:
+    @confirm "Publish release artifacts? [y/N]"
+    ./scripts/publish.sh
+
+# Interactive task
+web:
     @mode interactive
-    @isolation off
     npm run dev
 ```
 
-Run:
-```bash
-please --workspace . b --explain
-please --workspace . run b --explain
-please --workspace . dev
-please --workspace . run test --watch
-```
+## v0.5 highlights
+- First-class task parameters (`task [arg] [arg="default"]:`).
+- `@import` for modular multi-file task definitions.
+- Decorators: `@private`, `@confirm`.
+- Built-ins in interpolation: `{{ os() }}`, `{{ arch() }}`, `{{ env("KEY", "default") }}`.
+- Shebang task bodies (`#!`) for embedded polyglot scripts.
+- Subcommand-first CLI precedence with implicit task run.
+- Windows shell support (`pwsh` first, `cmd` fallback).
 
-Watch mode note:
-- `--watch` reruns target graphs on input changes and ignores `.git`, `.please`, and declared outputs.
-- For interactive tasks that already have internal watchers (for example Vite), Please prints a conflict warning.
-
-## TOML compatibility
-TOML `pleasefile`s from v0.1/v0.2 still run in v0.4 with a deprecation warning.
-Migration target for TOML removal is v0.5.
-
-## Showcase (React + Rust + Docker)
-```bash
-cd examples/showcase
-../../target/debug/please --workspace . run package_container --explain
-../../target/debug/please --workspace . run prove_cache
-```
-
-See:
-- [docs/showcase.md](docs/showcase.md)
-- [examples/showcase/README.md](examples/showcase/README.md)
+## Compatibility
+- TOML `pleasefile` (deprecated warning).
+- DSL `version = "0.3"` and `version = "0.4"` (deprecated warning).
+- Removal target for both legacy paths: `v0.6`.
 
 ## Examples
-Language/framework examples live under `examples/`:
+`examples/` includes:
 - `basic`
 - `minimal`
 - `polyglot`
@@ -97,7 +92,7 @@ Language/framework examples live under `examples/`:
 - `node-web`
 - `showcase`
 
-Smoke all non-Docker examples:
+Smoke examples:
 ```bash
 please --workspace . run examples_smoke --explain
 ```
@@ -111,8 +106,9 @@ cargo build --release -p please-cli
 ## Docs
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [CHANGELOG.md](CHANGELOG.md)
-- [docs/architecture.md](docs/architecture.md)
-- [docs/cache-telemetry.md](docs/cache-telemetry.md)
+- [docs/dsl-v0.5-reference.md](docs/dsl-v0.5-reference.md)
 - [docs/migration.md](docs/migration.md)
 - [docs/security.md](docs/security.md)
-- [docs/release-v0.4.md](docs/release-v0.4.md)
+- [docs/showcase.md](docs/showcase.md)
+- [docs/release-v0.5.md](docs/release-v0.5.md)
+- [docs/release-runbook.md](docs/release-runbook.md)

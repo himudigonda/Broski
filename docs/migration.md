@@ -1,32 +1,35 @@
-# Migration Guide: `make` / `just` to `please` (v0.4 DSL)
+# Migration Guide: `make` / `just` to `please` (v0.5 DSL)
 
 `Please` replaces workflow orchestration semantics, not Make/Just syntax parsing.
 
 ## Important
-There is intentionally **no automatic importer** in v0.4.
-Manual migration keeps task contracts explicit where you want deterministic caching.
+There is intentionally **no automatic importer** in v0.5.
+Manual migration keeps task contracts explicit where deterministic caching matters.
 
 ## Concept mapping
-| Concept | make | just | please v0.4 DSL |
+| Concept | make | just | please v0.5 DSL |
 | --- | --- | --- | --- |
 | Task definition | target | recipe | `task_name:` |
 | Dependencies | prerequisites | dependencies | `task: dep_a dep_b` |
+| Parameters | vars / env | recipe params | `task [arg] [arg="default"]:` |
 | Inputs | implicit/mtime | implicit | `@in ...` |
 | Outputs | implicit | implicit | `@out ...` |
 | Runtime env | shell env | vars/dotenv | `@env`, `@secret_env`, `@load .env` |
-| Variable reuse | make vars | just vars | `KEY = "value"`, `{{ KEY }}` |
+| Reusable values | make vars | just vars | `KEY = "value"`, built-ins, `{{ KEY }}` |
 | Tool prechecks | manual | manual | `@requires ...` |
 | Rebuild logic | timestamps | rerun by default | content fingerprint + cache |
 | Dev server mode | phony target | normal recipe | `@mode interactive` |
+| File modularity | include | import/mod | `@import path/to/pleasefile` |
 
 ## Translation checklist
 1. Create one DSL task per legacy target/recipe.
-2. Keep shell commands as normal indented lines (no quoted TOML strings).
-3. Add deps in the task header.
+2. Keep shell commands as normal indented lines.
+3. Add deps in task headers.
 4. Add all cache-relevant source/config patterns to `@in`.
-5. Add concrete artifacts/stamps to `@out` for graph tasks.
-6. Use `@mode interactive` for long-running/local dev tasks.
-7. Validate with:
+5. Add artifacts/stamps to `@out` for graph tasks.
+6. Use `@mode interactive` for long-running dev tasks.
+7. Add `@requires` where prerequisites are often missing.
+8. Validate with:
    - `please --workspace . doctor`
    - `please --workspace . run <task> --explain`
 
@@ -37,43 +40,28 @@ build: src/main.rs Cargo.toml
 ```
 
 ```text
-version = "0.4"
+version = "0.5"
 
 build:
     @in src/main.rs Cargo.toml
     @out target/release/app
-    @isolation off
     cargo build --release
 ```
 
-## Example: just -> please
+## Example: just params -> please params
 ```just
-lint:
-  cargo clippy --workspace --all-targets --all-features -- -D warnings
+build target mode="release":
+    cargo build --bin {{target}} --{{mode}}
 ```
 
 ```text
-version = "0.4"
+version = "0.5"
 
-lint:
-    @in Cargo.toml crates/**/*.rs
-    @out .please/stamps/lint.ok
-    @isolation off
-    mkdir -p .please/stamps
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
-    printf 'ok\n' > .please/stamps/lint.ok
+build [target] [mode="release"]:
+    cargo build --bin {{ target }} --{{ mode }}
 ```
 
-## TOML compatibility
-Legacy TOML files still work in v0.4 with a deprecation warning. Migrate before v0.5.
-
-## Dynamic variable caution
-Dynamic variables (`KEY = $(...)`) are powerful, but nondeterministic commands like `$(date)` or
-`$(uuidgen)` will force frequent cache misses. Prefer deterministic commands tied to repository
-state (for example: `$(git rev-parse HEAD)`).
-
-## Debugging misses
-Use explain mode to identify exactly what changed:
-```bash
-please --workspace . run lint --explain
-```
+## Compatibility policy in v0.5
+- DSL `version = "0.3"` and `version = "0.4"` still work with deprecation warnings.
+- TOML `pleasefile` still works with deprecation warning.
+- Removal target for both legacy paths: `v0.6`.

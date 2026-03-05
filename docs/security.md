@@ -11,9 +11,9 @@ deploy:
     ./scripts/deploy.sh
 ```
 
-Behavior in v0.4:
-- secret values are hashed in fingerprints (never emitted in plain text),
-- explain output reports generic changes (`cache miss: secret env changed`),
+Behavior in v0.5:
+- secret values are hashed in fingerprints (not emitted in plain text),
+- explain output reports generic secret-change reasons,
 - interactive terminal output is redacted,
 - persisted task stdout/stderr in cache metadata is redacted.
 
