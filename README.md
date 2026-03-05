@@ -4,7 +4,7 @@
 
 ## Status
 - Stable channel: `v0.2.0`
-- Current beta: `v0.3.0-beta.1` (Hybrid Orchestrator + DSL default)
+- Current beta: `v0.3.0-beta.2` (Hybrid Orchestrator + DSL default)
 
 ## Why Please
 - Content-hash invalidation (BLAKE3), not mtime heuristics.
@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh 
 
 Install a pinned beta:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | PLEASE_VERSION=v0.3.0-beta.1 bash
+curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | PLEASE_VERSION=v0.3.0-beta.2 bash
 ```
 
 ## CLI quickstart

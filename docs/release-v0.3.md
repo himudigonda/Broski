@@ -1,7 +1,7 @@
-# Please v0.3.0-beta.1 Release Notes
+# Please v0.3.0-beta.2 Release Notes
 
 ## Release type
-- Tag: `v0.3.0-beta.1`
+- Tag: `v0.3.0-beta.2`
 - Channel: beta prerelease
 - Repository: `himudigonda/Please`
 

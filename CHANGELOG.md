@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.3.0-beta.1] - 2026-03-05
+## [0.3.0-beta.2] - 2026-03-05
 
 ### Added
 - Hybrid task execution model:
