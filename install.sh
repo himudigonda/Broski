@@ -54,11 +54,41 @@ resolve_tag() {
 
   if [ -z "$tag" ]; then
     response="$(curl -fsSL "$api_all")"
-    tag="$(printf '%s\n' "$response" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+    tag="$(
+      python3 -c '
+import json, os, sys
+
+allow_prerelease = os.environ.get("PLEASE_ALLOW_PRERELEASE", "").lower() in {"1", "true", "yes"}
+
+try:
+    releases = json.load(sys.stdin)
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+candidate = ""
+for rel in releases:
+    if rel.get("draft"):
+        continue
+    if not rel.get("prerelease", False):
+        candidate = rel.get("tag_name", "")
+        break
+
+if not candidate and allow_prerelease:
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        candidate = rel.get("tag_name", "")
+        if candidate:
+            break
+
+print(candidate)
+' <<<"$response"
+    )"
   fi
 
   if [ -z "$tag" ]; then
-    fail "unable to resolve latest release tag from GitHub API; set PLEASE_VERSION explicitly"
+    fail "unable to resolve latest stable release tag from GitHub API; set PLEASE_VERSION explicitly (or set PLEASE_ALLOW_PRERELEASE=1)"
   fi
 
   echo "$tag"
