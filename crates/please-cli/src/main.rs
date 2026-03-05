@@ -14,6 +14,7 @@ use please_store::ArtifactStore;
 #[derive(Debug, Parser)]
 #[command(name = "please")]
 #[command(about = "Deterministic task runner powered by pleasefile")]
+#[command(after_help = "Stuck? Visit the Eclipse Portal: https://himudigonda.me/please_docs/")]
 #[command(version)]
 struct Cli {
     #[arg(long, default_value = ".")]
@@ -84,6 +85,7 @@ fn main() {
         } else {
             eprintln!("error: {error:#}");
         }
+        eprintln!("help: Eclipse Portal -> https://himudigonda.me/please_docs/");
         std::process::exit(1);
     }
 }
