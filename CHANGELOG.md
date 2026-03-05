@@ -19,12 +19,17 @@ All notable changes to this project are documented in this file.
 - Built-in interpolation functions:
   - `{{ os() }}`, `{{ arch() }}`, `{{ env("KEY", "default") }}`.
 - Release matrix publishes stable artifacts for Linux and macOS.
+- Eclipse Portal documentation engine under `website/` (Docusaurus v3):
+  - local search,
+  - mermaid architecture visuals,
+  - version dropdown with `v0.5` current and `v0.4` archived.
 
 ### Changed
 - Workspace and crate version bumped to `0.5.0`.
 - Root and all `examples/**/pleasefile` files migrated to `version = "0.5"`.
 - CLI parser + diagnostics now surface richer miette-backed source-span errors.
 - Release/CI docs and runbook updated for stable `v0.5.0`.
+- Legacy markdown docs moved to `docs/legacy` to preserve historical release context.
 
 ### Compatibility
 - TOML and DSL `0.3`/`0.4` continue to work in v0.5 with deprecation warnings.

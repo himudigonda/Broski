@@ -146,6 +146,7 @@ main() {
   install -m 0755 "${temp_dir}/please" "${INSTALL_DIR}/please"
 
   echo "Installed please to ${INSTALL_DIR}/please"
+  echo "Docs: https://himudigonda.me/please_docs/"
   if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
     echo "Add this to your shell profile:"
     echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""

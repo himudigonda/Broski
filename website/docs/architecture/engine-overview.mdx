@@ -1,0 +1,33 @@
+---
+sidebar_position: 1
+---
+
+# Engine Overview
+
+Please has two task modes:
+
+- **Graph mode**: staged, cached, deterministic, output-validated.
+- **Interactive mode**: direct workspace execution with inherited TTY.
+
+```mermaid
+flowchart TD
+  A[Resolve target] --> B[Build task graph]
+  B --> C{Task mode}
+  C -->|Graph| D[Stage snapshot]
+  D --> E[Compute fingerprint + manifest]
+  E --> F{Cache hit?}
+  F -->|Yes| G[Restore outputs]
+  F -->|No| H[Execute command]
+  H --> I[Promote outputs atomically]
+  C -->|Interactive| J[Run in workspace with stdio inherit]
+```
+
+## Determinism Contract
+
+Graph tasks must declare inputs and outputs. The runner fingerprints relevant execution state, including:
+
+- command
+- resolved variables and parameters
+- explicit environment keys
+- input file content hashes
+- mode/isolation metadata

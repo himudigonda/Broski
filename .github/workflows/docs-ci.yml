@@ -1,0 +1,40 @@
+name: docs-ci
+
+on:
+  push:
+    paths:
+      - 'website/**'
+      - 'docs/**'
+      - 'README.md'
+      - '.github/workflows/docs-ci.yml'
+  pull_request:
+    paths:
+      - 'website/**'
+      - 'docs/**'
+      - 'README.md'
+      - '.github/workflows/docs-ci.yml'
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Markdown/MDX lint
+        working-directory: website
+        run: npm run lint:md
+
+      - name: Build docs (includes broken-link check)
+        working-directory: website
+        run: npm run build

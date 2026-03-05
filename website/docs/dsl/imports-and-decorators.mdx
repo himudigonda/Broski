@@ -1,0 +1,28 @@
+---
+sidebar_position: 5
+---
+
+# Imports and Decorators
+
+## Imports
+
+```text
+@import backend/pleasefile
+@import frontend/pleasefile
+```
+
+Guardrails:
+
+- circular imports are rejected with a readable chain
+- collisions across task/alias/variable names fail hard
+- depth limit prevents runaway recursion
+
+## Decorators
+
+```text
+@private
+@confirm "Ship release artifacts? [y/N]"
+```
+
+- `@private` hides tasks from standard listings
+- `@confirm` protects sensitive workflows

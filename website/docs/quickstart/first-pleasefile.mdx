@@ -1,0 +1,33 @@
+---
+sidebar_position: 2
+---
+
+# Your First `pleasefile`
+
+```text title="pleasefile"
+version = "0.5"
+
+setup:
+    @mode interactive
+    npm install
+
+build [target] [mode="release"]:
+    @in src/**/* Cargo.toml
+    @out dist/{{ target }}
+    @requires cargo
+    cargo build --bin {{ target }} --{{ mode }}
+```
+
+Run tasks:
+
+```bash
+please setup
+please build api debug
+please run build --explain
+```
+
+## What this gives you
+
+- deterministic cache keys from `@in`, params, env, command, and metadata
+- strict graph mode when outputs are declared
+- interactive mode for long-running local workflows

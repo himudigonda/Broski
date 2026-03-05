@@ -1,0 +1,18 @@
+---
+sidebar_position: 2
+---
+
+# Migration
+
+## From Make / Just
+
+1. Port common commands as tasks.
+2. Add explicit `@in`/`@out` contracts for deterministic graph caching.
+3. Keep interactive workflows in `@mode interactive` tasks.
+4. Use `--explain` while tuning contracts.
+
+## Compatibility in v0.5
+
+- DSL `0.3` and `0.4` supported with deprecation warnings.
+- TOML supported with deprecation warning.
+- Planned removal for legacy formats: `v0.6`.
