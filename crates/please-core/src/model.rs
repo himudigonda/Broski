@@ -50,6 +50,10 @@ pub struct TaskSpec {
     #[serde(default)]
     pub deps: Vec<String>,
     #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub resolved_variables: BTreeMap<String, String>,
+    #[serde(default)]
     pub inputs: Vec<String>,
     #[serde(default)]
     pub outputs: Vec<String>,
@@ -66,6 +70,8 @@ pub struct TaskSpec {
     pub mode: Option<TaskMode>,
     #[serde(default)]
     pub working_dir: Option<String>,
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -1,19 +1,21 @@
-# Migration Guide: `make` / `just` to `please` (v0.3 DSL)
+# Migration Guide: `make` / `just` to `please` (v0.4 DSL)
 
 `Please` replaces workflow orchestration semantics, not Make/Just syntax parsing.
 
 ## Important
-There is intentionally **no automatic importer** in v0.3.
+There is intentionally **no automatic importer** in v0.4.
 Manual migration keeps task contracts explicit where you want deterministic caching.
 
 ## Concept mapping
-| Concept | make | just | please v0.3 DSL |
+| Concept | make | just | please v0.4 DSL |
 | --- | --- | --- | --- |
 | Task definition | target | recipe | `task_name:` |
 | Dependencies | prerequisites | dependencies | `task: dep_a dep_b` |
 | Inputs | implicit/mtime | implicit | `@in ...` |
 | Outputs | implicit | implicit | `@out ...` |
 | Runtime env | shell env | vars/dotenv | `@env`, `@secret_env`, `@load .env` |
+| Variable reuse | make vars | just vars | `KEY = "value"`, `{{ KEY }}` |
+| Tool prechecks | manual | manual | `@requires ...` |
 | Rebuild logic | timestamps | rerun by default | content fingerprint + cache |
 | Dev server mode | phony target | normal recipe | `@mode interactive` |
 
@@ -35,7 +37,7 @@ build: src/main.rs Cargo.toml
 ```
 
 ```text
-version = "0.3"
+version = "0.4"
 
 build:
     @in src/main.rs Cargo.toml
@@ -51,7 +53,7 @@ lint:
 ```
 
 ```text
-version = "0.3"
+version = "0.4"
 
 lint:
     @in Cargo.toml crates/**/*.rs
@@ -63,7 +65,12 @@ lint:
 ```
 
 ## TOML compatibility
-Legacy TOML files still work in v0.3 with a deprecation warning. Migrate before v0.5.
+Legacy TOML files still work in v0.4 with a deprecation warning. Migrate before v0.5.
+
+## Dynamic variable caution
+Dynamic variables (`KEY = $(...)`) are powerful, but nondeterministic commands like `$(date)` or
+`$(uuidgen)` will force frequent cache misses. Prefer deterministic commands tied to repository
+state (for example: `$(git rev-parse HEAD)`).
 
 ## Debugging misses
 Use explain mode to identify exactly what changed:

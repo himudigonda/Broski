@@ -8,13 +8,14 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0-beta.3"
+version = "0.4.0-rc.1"
 edition = "2021"
 license = "MIT"
 authors = ["Himudigonda"]
 repository = "https://github.com/himudigonda/Please"
 
 [workspace.dependencies]
+aho-corasick = "1.1"
 anyhow = "1.0"
 blake3 = "1.8"
 clap = { version = "4.5", features = ["derive"] }
@@ -22,6 +23,7 @@ glob = "0.3"
 indicatif = "0.17"
 libc = "0.2"
 num_cpus = "1.17"
+notify = "8.2"
 petgraph = "0.6"
 rayon = "1.10"
 reflink-copy = "0.1"

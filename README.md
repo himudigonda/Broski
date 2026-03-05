@@ -4,7 +4,7 @@
 
 ## Status
 - Stable channel: `v0.2.0`
-- Current beta: `v0.3.0-beta.3` (Hybrid Orchestrator + DSL default)
+- Current prerelease: `v0.4.0-rc.1` (Intelligence + Ergonomics)
 
 ## Why Please
 - Content-hash invalidation (BLAKE3), not mtime heuristics.
@@ -26,29 +26,33 @@ curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh 
 
 Install a pinned beta:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | PLEASE_VERSION=v0.3.0-beta.3 bash
+curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | PLEASE_VERSION=v0.4.0-rc.1 bash
 ```
 
 ## CLI quickstart
 ```bash
 please --workspace . list
 please --workspace . run ci
+please --workspace . ci
 please --workspace . run ci --explain
 please --workspace . graph ci --format text
 please --workspace . run test -- --watch
 ```
 
-## v0.3 DSL quickstart
+## v0.4 DSL quickstart
 Create a `pleasefile`:
 ```text
-version = "0.3"
+version = "0.4"
 alias b = build
+RUST_TARGET = "target/release/app"
 
+# Build release artifact
 build:
     @in src/**/* Cargo.toml
-    @out target/release/app
+    @out {{ RUST_TARGET }}
+    @requires cargo
     @isolation off
-    cargo build --release
+    cargo build --release && cp target/release/app {{ RUST_TARGET }}
 
 dev:
     @mode interactive
@@ -58,12 +62,18 @@ dev:
 
 Run:
 ```bash
+please --workspace . b --explain
 please --workspace . run b --explain
-please --workspace . run dev
+please --workspace . dev
+please --workspace . run test --watch
 ```
 
+Watch mode note:
+- `--watch` reruns target graphs on input changes and ignores `.git`, `.please`, and declared outputs.
+- For interactive tasks that already have internal watchers (for example Vite), Please prints a conflict warning.
+
 ## TOML compatibility
-TOML `pleasefile`s from v0.1/v0.2 still run in v0.3 with a deprecation warning.
+TOML `pleasefile`s from v0.1/v0.2 still run in v0.4 with a deprecation warning.
 Migration target for TOML removal is v0.5.
 
 ## Showcase (React + Rust + Docker)
@@ -104,4 +114,5 @@ cargo build --release -p please-cli
 - [docs/architecture.md](docs/architecture.md)
 - [docs/cache-telemetry.md](docs/cache-telemetry.md)
 - [docs/migration.md](docs/migration.md)
-- [docs/release-v0.3.md](docs/release-v0.3.md)
+- [docs/security.md](docs/security.md)
+- [docs/release-v0.4.md](docs/release-v0.4.md)

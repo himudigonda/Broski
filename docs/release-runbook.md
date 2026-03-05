@@ -1,7 +1,7 @@
-# Release Runbook: v0.3.0-beta.3
+# Release Runbook: v0.4.0-rc.1
 
 ## Scope
-This runbook covers cutting and publishing `v0.3.0-beta.3` for `himudigonda/Please`.
+This runbook covers cutting and publishing `v0.4.0-rc.1` for `himudigonda/Please`.
 
 ## Preconditions
 - `develop` is clean and synced.
@@ -20,17 +20,17 @@ This runbook covers cutting and publishing `v0.3.0-beta.3` for `himudigonda/Plea
 3. Validate example smoke path.
    - `cargo run -p please-cli -- --workspace . run examples_smoke`
 4. Tag release from `develop`.
-   - `git tag -a v0.3.0-beta.3 -m "Please v0.3.0-beta.3"`
-   - `git push origin v0.3.0-beta.3`
+   - `git tag -a v0.4.0-rc.1 -m "Please v0.4.0-rc.1"`
+   - `git push origin v0.4.0-rc.1`
 5. Wait for `release.yml` completion.
 6. Validate release artifacts:
-   - `please-v0.3.0-beta.3-x86_64-unknown-linux-gnu.tar.gz`
-   - `please-v0.3.0-beta.3-aarch64-apple-darwin.tar.gz`
+   - `please-v0.4.0-rc.1-x86_64-unknown-linux-gnu.tar.gz`
+   - `please-v0.4.0-rc.1-aarch64-apple-darwin.tar.gz`
    - `SHA256SUMS.txt`
 
 ## Post-publish validation
 1. Install check (explicit beta pin):
-   - `curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | PLEASE_VERSION=v0.3.0-beta.3 bash`
+   - `curl -fsSL https://raw.githubusercontent.com/himudigonda/Please/main/install.sh | PLEASE_VERSION=v0.4.0-rc.1 bash`
    - `please --version`
 2. Functional check:
    - `please --workspace . run ci --explain`
@@ -42,7 +42,7 @@ This runbook covers cutting and publishing `v0.3.0-beta.3` for `himudigonda/Plea
 ## Rollback / Yank
 1. Delete release in GitHub.
 2. Delete remote tag:
-   - `git push origin :refs/tags/v0.3.0-beta.3`
+   - `git push origin :refs/tags/v0.4.0-rc.1`
 3. Delete local tag:
-   - `git tag -d v0.3.0-beta.3`
-4. Ship follow-up beta (`v0.3.0-beta.3`) after fixes.
+   - `git tag -d v0.4.0-rc.1`
+4. Ship follow-up RC (`v0.4.0-rc.2`) after fixes.

@@ -5,7 +5,7 @@ use std::sync::Once;
 use anyhow::{Context, Result};
 
 use crate::model::PleaseFile;
-use crate::parser_winnow::parse_pleasefile_dsl;
+use crate::parser_winnow::parse_pleasefile_dsl_with_workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParserMode {
@@ -28,7 +28,7 @@ pub fn load_pleasefile(workspace_root: &Path) -> Result<PleaseFile> {
     let path = workspace_root.join("pleasefile");
     let content = fs::read_to_string(&path)
         .with_context(|| format!("reading pleasefile from '{}'", path.display()))?;
-    parse_pleasefile_with_mode(&content, ParserMode::from_env())
+    parse_pleasefile_with_mode_at(&content, ParserMode::from_env(), Some(workspace_root))
 }
 
 pub fn parse_pleasefile(content: &str) -> Result<PleaseFile> {
@@ -36,15 +36,29 @@ pub fn parse_pleasefile(content: &str) -> Result<PleaseFile> {
 }
 
 pub fn parse_pleasefile_with_mode(content: &str, mode: ParserMode) -> Result<PleaseFile> {
+    parse_pleasefile_with_mode_at(content, mode, None)
+}
+
+fn parse_pleasefile_with_mode_at(
+    content: &str,
+    mode: ParserMode,
+    workspace_root: Option<&Path>,
+) -> Result<PleaseFile> {
     match mode {
         ParserMode::Toml => parse_toml(content),
-        ParserMode::Dsl => parse_pleasefile_dsl(content),
+        ParserMode::Dsl => {
+            let parsed = parse_pleasefile_dsl_with_workspace(content, workspace_root)?;
+            warn_dsl_03_deprecated_if_needed(&parsed);
+            Ok(parsed)
+        }
         ParserMode::Auto => {
             if looks_like_toml(content) {
                 warn_toml_deprecated();
                 parse_toml(content)
             } else {
-                parse_pleasefile_dsl(content)
+                let parsed = parse_pleasefile_dsl_with_workspace(content, workspace_root)?;
+                warn_dsl_03_deprecated_if_needed(&parsed);
+                Ok(parsed)
             }
         }
     }
@@ -75,6 +89,17 @@ fn warn_toml_deprecated() {
             "warning: TOML pleasefile is deprecated; migrate to DSL (version = \"0.3\") before v0.5"
         );
     });
+}
+
+fn warn_dsl_03_deprecated_if_needed(parsed: &PleaseFile) {
+    if parsed.please.version == "0.3" {
+        static WARN_ONCE: Once = Once::new();
+        WARN_ONCE.call_once(|| {
+            eprintln!(
+                "warning: pleasefile DSL version \"0.3\" is deprecated; migrate to version = \"0.4\" before v0.5"
+            );
+        });
+    }
 }
 
 #[cfg(test)]

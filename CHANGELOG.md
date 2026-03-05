@@ -2,7 +2,29 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.3.0-beta.3] - 2026-03-05
+## [0.4.0-rc.1] - 2026-03-05
+
+### Added
+- Implicit task execution via `please <task>`.
+- Native watch mode (`--watch`) for rerunning selected target graphs.
+- DSL variable engine:
+  - static declarations (`KEY = "value"`),
+  - dynamic declarations (`KEY = $(...)`),
+  - strict interpolation (`{{ KEY }}`).
+- Task preflight requirements via `@requires`.
+- Secret redaction for interactive terminal output and persisted logs.
+- Task descriptions parsed from preceding comments and shown in `please list`.
+
+### Changed
+- DSL now supports `version = "0.4"` as the primary format.
+- Root and example `pleasefile`s migrated to `version = "0.4"`.
+- DSL `version = "0.3"` now emits a deprecation warning in v0.4.
+- Fingerprints now include resolved variable values used by tasks.
+
+### Compatibility
+- TOML `pleasefile` support remains available with deprecation warning (planned removal target: v0.5).
+
+## [0.3.0-beta.1] - 2026-03-05
 
 ### Added
 - Hybrid task execution model:

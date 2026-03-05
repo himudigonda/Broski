@@ -1,4 +1,4 @@
-version = "0.3"
+version = "0.4"
 
 generate_data:
     @in data/input.txt

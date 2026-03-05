@@ -199,6 +199,8 @@ mod tests {
     fn task(deps: &[&str]) -> TaskSpec {
         TaskSpec {
             deps: deps.iter().map(|d| (*d).to_string()).collect(),
+            description: None,
+            resolved_variables: BTreeMap::new(),
             inputs: vec!["src/main.rs".to_string()],
             outputs: vec!["dist/out.txt".to_string()],
             env: BTreeMap::new(),
@@ -208,6 +210,7 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            requires: Vec::new(),
         }
     }
 

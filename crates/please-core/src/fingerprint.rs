@@ -44,6 +44,9 @@ pub fn compute_fingerprint(
         "task:passthrough_args".to_string(),
         digest_value(&passthrough_args.join("\u{1f}")),
     );
+    for (key, value) in &task.resolved_variables {
+        manifest.insert(format!("var:{key}"), digest_value(value));
+    }
 
     for (idx, pattern) in task.inputs.iter().enumerate() {
         manifest.insert(format!("input_pattern:{idx}:{pattern}"), digest_value(pattern));
@@ -159,6 +162,8 @@ mod tests {
     fn base_task() -> TaskSpec {
         TaskSpec {
             deps: vec![],
+            description: None,
+            resolved_variables: BTreeMap::new(),
             inputs: vec!["src/main.rs".to_string()],
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
@@ -168,6 +173,7 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            requires: Vec::new(),
         }
     }
 
@@ -230,6 +236,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let task = TaskSpec {
             deps: vec![],
+            description: None,
+            resolved_variables: BTreeMap::new(),
             inputs: vec!["src/missing.txt".to_string()],
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
@@ -239,6 +247,7 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            requires: Vec::new(),
         };
         let resolved = vec![PathBuf::from("src/missing.txt")];
 
@@ -260,6 +269,8 @@ mod tests {
 
         let task = TaskSpec {
             deps: vec![],
+            description: None,
+            resolved_variables: BTreeMap::new(),
             inputs: vec!["src".to_string()],
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
@@ -269,6 +280,7 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            requires: Vec::new(),
         };
 
         let resolved = vec![PathBuf::from("src")];
