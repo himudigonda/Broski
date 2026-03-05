@@ -3,7 +3,7 @@ use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use please_cache::LocalArtifactStore;
 use please_core::{
     load_pleasefile, sweep_runtime_state, validate_pleasefile, Executor, IsolationMode, RunOptions,
@@ -19,7 +19,7 @@ struct Cli {
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -57,6 +57,8 @@ enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
+    #[command(external_subcommand)]
+    Task(Vec<String>),
 }
 
 #[derive(Debug, Subcommand)]
@@ -88,20 +90,29 @@ fn run() -> Result<()> {
         .or_else(|_| Ok::<PathBuf, anyhow::Error>(cli.workspace.clone()))?;
 
     match cli.command {
-        Command::Doctor { repair, no_repair } => run_doctor(&workspace, repair || !no_repair),
-        Command::Cache { command } => run_cache_command(&workspace, command),
-        Command::List => {
+        None => {
+            let mut command = Cli::command();
+            command.print_long_help().context("printing help output")?;
+            println!();
+            Ok(())
+        }
+        Some(Command::Doctor { repair, no_repair }) => run_doctor(&workspace, repair || !no_repair),
+        Some(Command::Cache { command }) => run_cache_command(&workspace, command),
+        Some(Command::List) => {
             let config = load_and_validate(&workspace)?;
             let graph = TaskGraph::build(&config.task)?;
             for task in graph.all_tasks_sorted() {
-                println!("{task}");
+                match config.task.get(&task).and_then(|spec| spec.description.as_deref()) {
+                    Some(description) => println!("{task}\t- {description}"),
+                    None => println!("{task}"),
+                }
             }
             for (alias, target) in &config.alias {
                 println!("alias {alias} -> {target}");
             }
             Ok(())
         }
-        Command::Graph { task, format } => {
+        Some(Command::Graph { task, format }) => {
             let config = load_and_validate(&workspace)?;
             let graph = TaskGraph::build(&config.task)?;
             let resolved_task = config.resolve_task_name(&task)?;
@@ -118,7 +129,16 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Run { task, dry_run, explain, force, no_cache, force_isolation, jobs, args } => {
+        Some(Command::Run {
+            task,
+            dry_run,
+            explain,
+            force,
+            no_cache,
+            force_isolation,
+            jobs,
+            args,
+        }) => {
             let config = load_and_validate(&workspace)?;
             let cache = LocalArtifactStore::new(cache_root(&workspace))?;
             let executor = Executor::new(&workspace, config, Arc::new(cache))?;
@@ -161,7 +181,37 @@ fn run() -> Result<()> {
 
             Ok(())
         }
+        Some(Command::Task(raw)) => {
+            let (task, args) = parse_implicit_task_args(raw)?;
+            let config = load_and_validate(&workspace)?;
+            let cache = LocalArtifactStore::new(cache_root(&workspace))?;
+            let executor = Executor::new(&workspace, config, Arc::new(cache))?;
+            let options = RunOptions { passthrough_args: args, ..RunOptions::default() };
+
+            let summary = executor.run_target(&task, &options)?;
+            if !summary.cache_hits.is_empty() {
+                println!("cache hits: {}", summary.cache_hits.join(", "));
+            }
+            if !summary.executed.is_empty() {
+                println!("executed: {}", summary.executed.join(", "));
+            }
+            if !summary.dry_run.is_empty() {
+                println!("dry-run: {}", summary.dry_run.join(", "));
+            }
+            Ok(())
+        }
     }
+}
+
+fn parse_implicit_task_args(raw: Vec<String>) -> Result<(String, Vec<String>)> {
+    let mut iter = raw.into_iter();
+    let task =
+        iter.next().ok_or_else(|| anyhow!("implicit task execution expected a task name"))?;
+    let mut args: Vec<String> = iter.collect();
+    if args.first().is_some_and(|value| value == "--") {
+        args.remove(0);
+    }
+    Ok((task, args))
 }
 
 fn load_and_validate(workspace: &Path) -> Result<please_core::PleaseFile> {
@@ -310,7 +360,7 @@ mod tests {
         .expect("parse cli");
 
         match cli.command {
-            Command::Run { force_isolation, .. } => assert!(force_isolation),
+            Some(Command::Run { force_isolation, .. }) => assert!(force_isolation),
             _ => panic!("expected run command"),
         }
     }
@@ -320,7 +370,7 @@ mod tests {
         let cli = Cli::try_parse_from(["please", "--workspace", ".", "run", "build", "--explain"])
             .expect("parse cli");
         match cli.command {
-            Command::Run { explain, .. } => assert!(explain),
+            Some(Command::Run { explain, .. }) => assert!(explain),
             _ => panic!("expected run command"),
         }
     }
@@ -356,7 +406,7 @@ mod tests {
         let cli =
             Cli::try_parse_from(["please", "--workspace", ".", "doctor"]).expect("parse doctor");
         match cli.command {
-            Command::Doctor { repair, no_repair } => {
+            Some(Command::Doctor { repair, no_repair }) => {
                 let effective_repair = repair || !no_repair;
                 assert!(effective_repair);
             }
@@ -380,10 +430,34 @@ mod tests {
         .expect("parse cli");
 
         match cli.command {
-            Command::Run { args, .. } => {
+            Some(Command::Run { args, .. }) => {
                 assert_eq!(args, vec!["--watch", "--grep", "slow suite"]);
             }
             _ => panic!("expected run command"),
+        }
+    }
+
+    #[test]
+    fn parses_implicit_task_invocation() {
+        let cli = Cli::try_parse_from(["please", "--workspace", ".", "build"]).expect("parse cli");
+        match cli.command {
+            Some(Command::Task(raw)) => assert_eq!(raw, vec!["build"]),
+            _ => panic!("expected external subcommand task"),
+        }
+    }
+
+    #[test]
+    fn parses_implicit_task_with_passthrough() {
+        let cli =
+            Cli::try_parse_from(["please", "--workspace", ".", "test", "--", "--grep", "slow"])
+                .expect("parse cli");
+        match cli.command {
+            Some(Command::Task(raw)) => {
+                let (task, args) = parse_implicit_task_args(raw).expect("normalized args");
+                assert_eq!(task, "test");
+                assert_eq!(args, vec!["--grep", "slow"]);
+            }
+            _ => panic!("expected external subcommand task"),
         }
     }
 }

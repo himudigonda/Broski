@@ -1,6 +1,7 @@
 version = "0.3"
 alias p = process
 
+# Process input into dist output
 process:
     @in src/input.txt
     @out dist/out.txt

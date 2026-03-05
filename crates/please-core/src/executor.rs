@@ -995,6 +995,7 @@ mod tests {
     fn simple_task(command: &str) -> TaskSpec {
         TaskSpec {
             deps: vec![],
+            description: None,
             inputs: vec!["src/input.txt".to_string()],
             outputs: vec!["dist/output.txt".to_string()],
             env: BTreeMap::new(),
@@ -1155,6 +1156,7 @@ mod tests {
             "build".to_string(),
             TaskSpec {
                 deps: vec![],
+                description: None,
                 inputs: vec!["src/input.txt".to_string()],
                 outputs: vec!["dist/output.txt".to_string()],
                 env: BTreeMap::new(),
@@ -1198,6 +1200,7 @@ mod tests {
             "build".to_string(),
             TaskSpec {
                 deps: vec![],
+                description: None,
                 inputs: vec!["src/input.txt".to_string()],
                 outputs: vec!["dist/output.txt".to_string()],
                 env: BTreeMap::new(),

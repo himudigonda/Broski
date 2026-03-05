@@ -63,3 +63,15 @@ fn test_run_alias_executes_target_task() {
         .success()
         .stdout(predicate::str::contains("executed: process"));
 }
+
+#[test]
+fn test_implicit_run_executes_task() {
+    let temp = support::workspace_from_fixture("basic");
+    let workspace = temp.path();
+
+    support::please_cmd(workspace)
+        .arg("process")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("executed: process"));
+}

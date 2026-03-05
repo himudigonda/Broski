@@ -6,13 +6,17 @@ use crate::graph::TaskGraph;
 use crate::model::{PleaseFile, TaskMode};
 use crate::resolver::normalize_relative_path;
 
+pub const RESERVED_COMMAND_NAMES: &[&str] =
+    &["run", "list", "graph", "doctor", "cache", "help", "version"];
+
 pub fn validate_pleasefile(config: &PleaseFile, workspace_root: &Path) -> Result<()> {
     if config.please.version != "0.1"
         && config.please.version != "0.2"
         && config.please.version != "0.3"
+        && config.please.version != "0.4"
     {
         return Err(anyhow!(
-            "unsupported pleasefile version '{}'; expected '0.1', '0.2', or '0.3'",
+            "unsupported pleasefile version '{}'; expected '0.1', '0.2', '0.3', or '0.4'",
             config.please.version
         ));
     }
@@ -93,7 +97,22 @@ pub fn validate_pleasefile(config: &PleaseFile, workspace_root: &Path) -> Result
 }
 
 fn validate_aliases(config: &PleaseFile) -> Result<()> {
+    for task_name in config.task.keys() {
+        if RESERVED_COMMAND_NAMES.contains(&task_name.as_str()) {
+            return Err(anyhow!(
+                "task '{}' shadows reserved CLI command; choose a different task name",
+                task_name
+            ));
+        }
+    }
+
     for (alias, target) in &config.alias {
+        if RESERVED_COMMAND_NAMES.contains(&alias.as_str()) {
+            return Err(anyhow!(
+                "alias '{}' shadows reserved CLI command; choose a different alias name",
+                alias
+            ));
+        }
         if config.task.contains_key(alias) {
             return Err(anyhow!(
                 "alias '{}' shadows an existing task; alias shadowing is not allowed",
@@ -132,6 +151,7 @@ mod tests {
     fn base_task() -> TaskSpec {
         TaskSpec {
             deps: Vec::new(),
+            description: None,
             inputs: vec!["src/main.rs".to_string()],
             outputs: vec!["dist/out.txt".to_string()],
             env: BTreeMap::new(),
@@ -178,5 +198,21 @@ mod tests {
         };
 
         assert!(validate_pleasefile(&config, Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn rejects_reserved_task_name() {
+        let mut tasks = BTreeMap::new();
+        tasks.insert("list".to_string(), base_task());
+
+        let config = PleaseFile {
+            please: PleaseSection { version: "0.3".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+
+        let error = validate_pleasefile(&config, Path::new(".")).expect_err("should fail");
+        assert!(error.to_string().contains("reserved CLI command"));
     }
 }

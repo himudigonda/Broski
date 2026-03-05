@@ -159,6 +159,7 @@ mod tests {
     fn base_task() -> TaskSpec {
         TaskSpec {
             deps: vec![],
+            description: None,
             inputs: vec!["src/main.rs".to_string()],
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
@@ -230,6 +231,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let task = TaskSpec {
             deps: vec![],
+            description: None,
             inputs: vec!["src/missing.txt".to_string()],
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
@@ -260,6 +262,7 @@ mod tests {
 
         let task = TaskSpec {
             deps: vec![],
+            description: None,
             inputs: vec!["src".to_string()],
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),

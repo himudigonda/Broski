@@ -7,6 +7,7 @@ use crate::model::{PleaseFile, PleaseSection, RunSpec, TaskMode, TaskSpec};
 #[derive(Debug, Clone, Default)]
 struct TaskDraft {
     deps: Vec<String>,
+    description: Option<String>,
     inputs: Vec<String>,
     outputs: Vec<String>,
     env: BTreeMap<String, String>,
@@ -24,33 +25,47 @@ pub fn parse_pleasefile_dsl(content: &str) -> Result<PleaseFile> {
     let mut load_env = Vec::new();
     let mut tasks: BTreeMap<String, TaskDraft> = BTreeMap::new();
     let mut current_task: Option<String> = None;
+    let mut pending_task_comments: Vec<String> = Vec::new();
 
     for (line_no, raw_line) in content.lines().enumerate() {
         let line_no = line_no + 1;
         let line = raw_line.trim_end_matches('\r');
         let trimmed = line.trim();
+        let indented = line.starts_with(' ') || line.starts_with('\t');
 
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if trimmed.is_empty() {
+            pending_task_comments.clear();
             continue;
         }
 
-        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if trimmed.starts_with('#') {
+            if current_task.is_none() {
+                let comment = trimmed.trim_start_matches('#').trim().to_string();
+                if !comment.is_empty() {
+                    pending_task_comments.push(comment);
+                }
+            }
+            continue;
+        }
 
         if !current_task.as_ref().is_some_and(|_| indented) {
             current_task = None;
 
             if let Some(value) = parse_version_line(trimmed, line_no)? {
                 version = Some(value);
+                pending_task_comments.clear();
                 continue;
             }
 
             if let Some(path) = parse_load_line(trimmed, line_no)? {
                 load_env.push(path);
+                pending_task_comments.clear();
                 continue;
             }
 
             if let Some((alias, target)) = parse_alias_line(trimmed, line_no)? {
                 aliases.insert(alias, target);
+                pending_task_comments.clear();
                 continue;
             }
 
@@ -58,7 +73,16 @@ pub fn parse_pleasefile_dsl(content: &str) -> Result<PleaseFile> {
                 if tasks.contains_key(&task_name) {
                     return Err(parse_error(line_no, 1, format!("duplicate task '{}'", task_name)));
                 }
-                tasks.insert(task_name.clone(), TaskDraft { deps, ..TaskDraft::default() });
+                let description = if pending_task_comments.is_empty() {
+                    None
+                } else {
+                    Some(pending_task_comments.join(" "))
+                };
+                tasks.insert(
+                    task_name.clone(),
+                    TaskDraft { deps, description, ..TaskDraft::default() },
+                );
+                pending_task_comments.clear();
                 current_task = Some(task_name);
                 continue;
             }
@@ -196,6 +220,7 @@ pub fn parse_pleasefile_dsl(content: &str) -> Result<PleaseFile> {
             name,
             TaskSpec {
                 deps: draft.deps,
+                description: draft.description,
                 inputs: draft.inputs,
                 outputs: draft.outputs,
                 env: draft.env,
@@ -379,5 +404,25 @@ mod tests {
 
         let error = parse_pleasefile_dsl(input).expect_err("version mismatch should fail");
         assert!(error.to_string().contains("requires version"));
+    }
+
+    #[test]
+    fn captures_task_description_from_comments() {
+        let input = r#"
+            version = "0.3"
+
+            # Build backend artifacts
+            # Uses Cargo release profile
+            build:
+                @out dist/out.txt
+                echo hi > dist/out.txt
+        "#;
+
+        let parsed = parse_pleasefile_dsl(input).expect("parse DSL");
+        let build = parsed.task.get("build").expect("build task");
+        assert_eq!(
+            build.description.as_deref(),
+            Some("Build backend artifacts Uses Cargo release profile")
+        );
     }
 }
