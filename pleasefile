@@ -1,50 +1,59 @@
-[please]
-version = "0.2"
+version = "0.3"
 
-[task.fmt]
-inputs = ["Cargo.toml", "Cargo.lock", "rustfmt.toml", "crates/**/*.rs"]
-outputs = [".please/stamps/fmt.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && cargo fmt --all --check && printf 'ok\n' > .please/stamps/fmt.ok"
+fmt:
+    @in Cargo.toml Cargo.lock rustfmt.toml crates/**/*.rs
+    @out .please/stamps/fmt.ok
+    @isolation off
+    mkdir -p .please/stamps
+    cargo fmt --all --check
+    printf 'ok\n' > .please/stamps/fmt.ok
 
-[task.lint]
-deps = ["fmt"]
-inputs = ["Cargo.toml", "Cargo.lock", "clippy.toml", "crates/**/*.rs"]
-outputs = [".please/stamps/lint.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && cargo clippy --workspace --all-targets --all-features -- -D warnings && printf 'ok\n' > .please/stamps/lint.ok"
+lint: fmt
+    @in Cargo.toml Cargo.lock clippy.toml crates/**/*.rs
+    @out .please/stamps/lint.ok
+    @isolation off
+    mkdir -p .please/stamps
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    printf 'ok\n' > .please/stamps/lint.ok
 
-[task.test]
-deps = ["lint"]
-inputs = ["Cargo.toml", "Cargo.lock", "crates/**/*.rs", "crates/**/tests/**/*.rs"]
-outputs = [".please/stamps/test.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && if command -v cargo-nextest >/dev/null 2>&1; then cargo nextest run --workspace --all-features; else cargo test --workspace --all-features; fi && printf 'ok\n' > .please/stamps/test.ok"
+test: lint
+    @in Cargo.toml Cargo.lock crates/**/*.rs crates/**/tests/**/*.rs
+    @out .please/stamps/test.ok
+    @isolation off
+    mkdir -p .please/stamps
+    if command -v cargo-nextest >/dev/null 2>&1; then
+      cargo nextest run --workspace --all-features
+    else
+      cargo test --workspace --all-features
+    fi
+    printf 'ok\n' > .please/stamps/test.ok
 
-[task.cov]
-deps = ["test"]
-inputs = ["Cargo.toml", "Cargo.lock", "crates/**/*.rs"]
-outputs = [".please/stamps/cov.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && if ! command -v cargo-llvm-cov >/dev/null 2>&1; then cargo install --locked cargo-llvm-cov; fi && cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines ${PLEASE_COVERAGE_MIN:-45} && printf 'ok\n' > .please/stamps/cov.ok"
+cov: test
+    @in Cargo.toml Cargo.lock crates/**/*.rs
+    @out .please/stamps/cov.ok
+    @isolation off
+    mkdir -p .please/stamps
+    if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+      cargo install --locked cargo-llvm-cov
+    fi
+    cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines ${PLEASE_COVERAGE_MIN:-45}
+    printf 'ok\n' > .please/stamps/cov.ok
 
-[task.ci]
-deps = ["cov"]
-inputs = ["pleasefile"]
-outputs = [".please/stamps/ci.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && printf 'ok\n' > .please/stamps/ci.ok"
+ci: cov
+    @in pleasefile
+    @out .please/stamps/ci.ok
+    @isolation off
+    mkdir -p .please/stamps
+    printf 'ok\n' > .please/stamps/ci.ok
 
-[task.examples_smoke]
-inputs = ["pleasefile", "examples/**/pleasefile", "examples/**/src/**/*", "examples/**/Cargo.toml", "examples/**/go.mod", "examples/**/package.json"]
-outputs = [".please/stamps/examples_smoke.ok"]
-isolation = "off"
-run = """
-mkdir -p .please/stamps
-cargo run -p please-cli -- --workspace examples/minimal run hello
-cargo run -p please-cli -- --workspace examples/polyglot run package
-cargo run -p please-cli -- --workspace examples/python-cli run ci
-cargo run -p please-cli -- --workspace examples/go-http run ci
-cargo run -p please-cli -- --workspace examples/node-web run ci
-printf 'ok\n' > .please/stamps/examples_smoke.ok
-"""
+examples_smoke:
+    @in pleasefile examples/**/pleasefile examples/**/src/**/* examples/**/Cargo.toml examples/**/go.mod examples/**/package.json
+    @out .please/stamps/examples_smoke.ok
+    @isolation off
+    mkdir -p .please/stamps
+    cargo run -p please-cli -- --workspace examples/minimal run hello
+    cargo run -p please-cli -- --workspace examples/polyglot run package
+    cargo run -p please-cli -- --workspace examples/python-cli run ci
+    cargo run -p please-cli -- --workspace examples/go-http run ci
+    cargo run -p please-cli -- --workspace examples/node-web run ci
+    printf 'ok\n' > .please/stamps/examples_smoke.ok

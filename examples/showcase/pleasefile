@@ -1,35 +1,39 @@
-[please]
-version = "0.2"
+version = "0.3"
 
-[task.build_ui]
-inputs = ["frontend/package.json", "frontend/package-lock.json", "frontend/index.html", "frontend/src/**/*", "frontend/tsconfig.json", "frontend/vite.config.ts"]
-outputs = ["frontend/dist"]
-isolation = "off"
-run = "cd frontend && npm ci && npm run build"
+build_ui:
+    @in frontend/package.json frontend/package-lock.json frontend/index.html frontend/src/**/* frontend/tsconfig.json frontend/vite.config.ts
+    @out frontend/dist
+    @dir frontend
+    @isolation off
+    npm ci
+    npm run build
 
-[task.build_api]
-inputs = ["backend/Cargo.toml", "backend/src/**/*.rs"]
-outputs = ["backend/target/release/showcase-server"]
-isolation = "off"
-run = "cargo build --release --manifest-path backend/Cargo.toml"
+build_api:
+    @in backend/Cargo.toml backend/src/**/*.rs
+    @out backend/target/release/showcase-server
+    @isolation off
+    cargo build --release --manifest-path backend/Cargo.toml
 
-[task.package_container]
-deps = ["build_ui", "build_api"]
-inputs = ["Dockerfile", "frontend/dist/**/*", "backend/target/release/showcase-server"]
-outputs = ["artifacts/showcase-image.tar"]
-isolation = "off"
-run = "mkdir -p artifacts && docker build -t please-showcase:latest . && docker save please-showcase:latest -o artifacts/showcase-image.tar"
+package_container: build_ui build_api
+    @in Dockerfile frontend/dist/**/* backend/target/release/showcase-server
+    @out artifacts/showcase-image.tar
+    @isolation off
+    mkdir -p artifacts
+    docker build -t please-showcase:latest .
+    docker save please-showcase:latest -o artifacts/showcase-image.tar
 
-[task.run_container]
-deps = ["package_container"]
-inputs = ["artifacts/showcase-image.tar"]
-outputs = [".please/stamps/run_container.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && docker load -i artifacts/showcase-image.tar && docker rm -f please-showcase >/dev/null 2>&1 || true && docker run -d --name please-showcase -p 8080:8080 please-showcase:latest && printf 'ok\n' > .please/stamps/run_container.ok"
+run_container: package_container
+    @in artifacts/showcase-image.tar
+    @out .please/stamps/run_container.ok
+    @isolation off
+    mkdir -p .please/stamps
+    docker load -i artifacts/showcase-image.tar
+    docker rm -f please-showcase >/dev/null 2>&1 || true
+    docker run -d --name please-showcase -p 8080:8080 please-showcase:latest
+    printf 'ok\n' > .please/stamps/run_container.ok
 
-[task.prove_cache]
-deps = ["build_ui", "build_api"]
-inputs = ["pleasefile", "scripts/prove-worth.sh"]
-outputs = ["artifacts/prove-cache.log"]
-isolation = "off"
-run = "bash scripts/prove-worth.sh"
+prove_cache: build_ui build_api
+    @in pleasefile scripts/prove-worth.sh
+    @out artifacts/prove-cache.log
+    @isolation off
+    bash scripts/prove-worth.sh

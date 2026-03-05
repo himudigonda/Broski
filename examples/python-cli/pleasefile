@@ -1,22 +1,23 @@
-[please]
-version = "0.2"
+version = "0.3"
 
-[task.test]
-inputs = ["src/**/*.py", "tests/**/*.py"]
-outputs = [".please/stamps/test.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && python3 -m unittest discover -s tests -p 'test_*.py' && printf 'ok\n' > .please/stamps/test.ok"
+test:
+    @in src/**/*.py tests/**/*.py
+    @out .please/stamps/test.ok
+    @isolation off
+    mkdir -p .please/stamps
+    python3 -m unittest discover -s tests -p 'test_*.py'
+    printf 'ok\n' > .please/stamps/test.ok
 
-[task.package]
-deps = ["test"]
-inputs = ["src/**/*.py"]
-outputs = ["dist/python-cli.tar"]
-isolation = "off"
-run = "mkdir -p dist && tar -cf dist/python-cli.tar src"
+package: test
+    @in src/**/*.py
+    @out dist/python-cli.tar
+    @isolation off
+    mkdir -p dist
+    tar -cf dist/python-cli.tar src
 
-[task.ci]
-deps = ["package"]
-inputs = ["pleasefile"]
-outputs = [".please/stamps/ci.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && printf 'ok\n' > .please/stamps/ci.ok"
+ci: package
+    @in pleasefile
+    @out .please/stamps/ci.ok
+    @isolation off
+    mkdir -p .please/stamps
+    printf 'ok\n' > .please/stamps/ci.ok

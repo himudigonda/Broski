@@ -1,7 +1,9 @@
-[please]
-version = "0.2"
+version = "0.3"
 
-[task.hello]
-inputs = ["pleasefile"]
-outputs = [".please/stamps/hello.ok"]
-run = "mkdir -p .please/stamps && echo 'hello from please' && printf 'ok\n' > .please/stamps/hello.ok"
+hello:
+    @in pleasefile
+    @out .please/stamps/hello.ok
+    @isolation off
+    mkdir -p .please/stamps
+    echo 'hello from please'
+    printf 'ok\n' > .please/stamps/hello.ok

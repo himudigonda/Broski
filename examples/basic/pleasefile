@@ -1,13 +1,15 @@
-[please]
-version = "0.2"
+version = "0.3"
 
-[task.gen]
-inputs = ["data/input.txt"]
-outputs = ["build/out.txt"]
-run = "mkdir -p build && tr '[:lower:]' '[:upper:]' < data/input.txt > build/out.txt"
+gen:
+    @in data/input.txt
+    @out build/out.txt
+    @isolation off
+    mkdir -p build
+    tr '[:lower:]' '[:upper:]' < data/input.txt > build/out.txt
 
-[task.package]
-deps = ["gen"]
-inputs = ["build/out.txt"]
-outputs = ["dist/out.tar"]
-run = "mkdir -p dist && tar -cf dist/out.tar build/out.txt"
+package: gen
+    @in build/out.txt
+    @out dist/out.tar
+    @isolation off
+    mkdir -p dist
+    tar -cf dist/out.tar build/out.txt

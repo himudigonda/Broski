@@ -1,22 +1,22 @@
-[please]
-version = "0.2"
+version = "0.3"
 
-[task.test]
-inputs = ["package.json", "src/**/*.js"]
-outputs = [".please/stamps/test.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && npm test && printf 'ok\n' > .please/stamps/test.ok"
+test:
+    @in package.json src/**/*.js
+    @out .please/stamps/test.ok
+    @isolation off
+    mkdir -p .please/stamps
+    npm test
+    printf 'ok\n' > .please/stamps/test.ok
 
-[task.build]
-deps = ["test"]
-inputs = ["package.json", "src/**/*.js", "scripts/build.mjs"]
-outputs = ["dist/src"]
-isolation = "off"
-run = "npm run build"
+build: test
+    @in package.json src/**/*.js scripts/build.mjs
+    @out dist/src
+    @isolation off
+    npm run build
 
-[task.ci]
-deps = ["build"]
-inputs = ["pleasefile"]
-outputs = [".please/stamps/ci.ok"]
-isolation = "off"
-run = "mkdir -p .please/stamps && printf 'ok\n' > .please/stamps/ci.ok"
+ci: build
+    @in pleasefile
+    @out .please/stamps/ci.ok
+    @isolation off
+    mkdir -p .please/stamps
+    printf 'ok\n' > .please/stamps/ci.ok

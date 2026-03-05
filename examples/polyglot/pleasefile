@@ -1,20 +1,22 @@
-[please]
-version = "0.2"
+version = "0.3"
 
-[task.generate_data]
-inputs = ["data/input.txt"]
-outputs = ["build/generated.txt"]
-run = "mkdir -p build && tr '[:lower:]' '[:upper:]' < data/input.txt > build/generated.txt"
+generate_data:
+    @in data/input.txt
+    @out build/generated.txt
+    @isolation off
+    mkdir -p build
+    tr '[:lower:]' '[:upper:]' < data/input.txt > build/generated.txt
 
-[task.build_backend]
-deps = ["generate_data"]
-inputs = ["src/**/*.rs", "Cargo.toml", "build/generated.txt"]
-outputs = ["target/release/backend"]
-env = { RUST_LOG = "info" }
-run = "cargo build --release"
+build_backend: generate_data
+    @in src/**/*.rs Cargo.toml build/generated.txt
+    @out target/release/backend
+    @env RUST_LOG=info
+    @isolation off
+    cargo build --release
 
-[task.package]
-deps = ["build_backend"]
-inputs = ["target/release/backend"]
-outputs = ["dist/backend.tar"]
-run = "mkdir -p dist && tar -cf dist/backend.tar target/release/backend"
+package: build_backend
+    @in target/release/backend
+    @out dist/backend.tar
+    @isolation off
+    mkdir -p dist
+    tar -cf dist/backend.tar target/release/backend
