@@ -48,6 +48,10 @@ fn benchmark_fingerprint(c: &mut Criterion) {
             isolation: None,
             mode: None,
             working_dir: None,
+            params: Vec::new(),
+            private: false,
+            confirm: None,
+            shell_override: None,
             requires: Vec::new(),
         };
 
@@ -86,6 +90,10 @@ fn task(deps: &[&str]) -> TaskSpec {
         isolation: None,
         mode: None,
         working_dir: None,
+        params: Vec::new(),
+        private: false,
+        confirm: None,
+        shell_override: None,
         requires: Vec::new(),
     }
 }

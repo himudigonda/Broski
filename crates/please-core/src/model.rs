@@ -71,7 +71,31 @@ pub struct TaskSpec {
     #[serde(default)]
     pub working_dir: Option<String>,
     #[serde(default)]
+    pub params: Vec<TaskParamSpec>,
+    #[serde(default)]
+    pub private: bool,
+    #[serde(default)]
+    pub confirm: Option<String>,
+    #[serde(default)]
+    pub shell_override: Option<ShellSpec>,
+    #[serde(default)]
     pub requires: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TaskParamSpec {
+    pub name: String,
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ShellSpec {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

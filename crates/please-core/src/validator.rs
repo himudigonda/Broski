@@ -14,9 +14,10 @@ pub fn validate_pleasefile(config: &PleaseFile, workspace_root: &Path) -> Result
         && config.please.version != "0.2"
         && config.please.version != "0.3"
         && config.please.version != "0.4"
+        && config.please.version != "0.5"
     {
         return Err(anyhow!(
-            "unsupported pleasefile version '{}'; expected '0.1', '0.2', '0.3', or '0.4'",
+            "unsupported pleasefile version '{}'; expected '0.1', '0.2', '0.3', '0.4', or '0.5'",
             config.please.version
         ));
     }
@@ -88,6 +89,26 @@ pub fn validate_pleasefile(config: &PleaseFile, workspace_root: &Path) -> Result
         if let Some(dir) = &task.working_dir {
             let _ = normalize_relative_path(dir)
                 .with_context(|| format!("task '{}' invalid working_dir '{}'", task_name, dir))?;
+        }
+
+        let mut seen_params = std::collections::BTreeSet::new();
+        for param in &task.params {
+            if param.name.trim().is_empty() {
+                return Err(anyhow!("task '{}' has parameter with empty name", task_name));
+            }
+            if !seen_params.insert(param.name.clone()) {
+                return Err(anyhow!(
+                    "task '{}' has duplicate parameter '{}'",
+                    task_name,
+                    param.name
+                ));
+            }
+        }
+        if task.confirm.as_ref().is_some_and(|value| value.trim().is_empty()) {
+            return Err(anyhow!(
+                "task '{}' has empty @confirm prompt; provide a non-empty message",
+                task_name
+            ));
         }
     }
 
@@ -162,6 +183,10 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            params: Vec::new(),
+            private: false,
+            confirm: None,
+            shell_override: None,
             requires: Vec::new(),
         }
     }

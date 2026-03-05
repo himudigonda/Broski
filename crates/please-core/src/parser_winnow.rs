@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use miette::{miette, LabeledSpan};
 
-use crate::model::{PleaseFile, PleaseSection, RunSpec, TaskMode, TaskSpec};
+use crate::model::{PleaseFile, PleaseSection, RunSpec, TaskMode, TaskParamSpec, TaskSpec};
 
 thread_local! {
     static DSL_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -39,6 +39,7 @@ impl Drop for DslSourceGuard {
 #[derive(Debug, Clone, Default)]
 struct TaskDraft {
     deps: Vec<String>,
+    params: Vec<TaskParamSpec>,
     description: Option<String>,
     resolved_variables: BTreeMap<String, String>,
     inputs: Vec<String>,
@@ -49,6 +50,8 @@ struct TaskDraft {
     isolation: Option<crate::model::IsolationMode>,
     mode: Option<TaskMode>,
     working_dir: Option<String>,
+    private: bool,
+    confirm: Option<String>,
     requires: Vec<String>,
     run_lines: Vec<String>,
 }
@@ -146,8 +149,9 @@ pub fn parse_pleasefile_dsl_with_workspace(
                 &variable_defs,
                 &mut resolved_variables,
                 workspace_root,
+                None,
             )?;
-            if let Some((task_name, deps)) = parse_task_header(&header_line, line_no)? {
+            if let Some((task_name, params, deps)) = parse_task_header(&header_line, line_no)? {
                 seen_task_header = true;
                 if tasks.contains_key(&task_name) {
                     return Err(parse_error(line_no, 1, format!("duplicate task '{}'", task_name)));
@@ -161,6 +165,7 @@ pub fn parse_pleasefile_dsl_with_workspace(
                     task_name.clone(),
                     TaskDraft {
                         deps,
+                        params,
                         description,
                         resolved_variables: used_vars
                             .into_iter()
@@ -194,12 +199,14 @@ pub fn parse_pleasefile_dsl_with_workspace(
         let Some(task) = tasks.get_mut(task_name) else {
             return Err(parse_error(line_no, 1, "internal parser state error".to_string()));
         };
+        let allowed_params = task_param_names(task);
         let (body, used_vars) = interpolate_template_with_defs(
             body,
             line_no,
             &variable_defs,
             &mut resolved_variables,
             workspace_root,
+            Some(&allowed_params),
         )?;
         for name in used_vars {
             if let Some(value) = resolved_variables.get(&name) {
@@ -279,6 +286,25 @@ pub fn parse_pleasefile_dsl_with_workspace(
             continue;
         }
 
+        if body == "@private" {
+            task.private = true;
+            continue;
+        }
+
+        if let Some(rest) = body.strip_prefix("@confirm") {
+            let msg = rest.trim();
+            if msg.is_empty() {
+                return Err(parse_error(
+                    line_no,
+                    1,
+                    "@confirm requires a prompt message".to_string(),
+                ));
+            }
+            let normalized = msg.trim_matches('"').trim_matches('\'').to_string();
+            task.confirm = Some(normalized);
+            continue;
+        }
+
         if let Some(rest) = body.strip_prefix("@isolation") {
             let values = split_items(rest, line_no, "@isolation")?;
             if values.len() != 1 {
@@ -310,11 +336,11 @@ pub fn parse_pleasefile_dsl_with_workspace(
     }
 
     let version = version.ok_or_else(|| {
-        parse_error(1, 1, "missing required top-level line: version = \"0.4\"".to_string())
+        parse_error(1, 1, "missing required top-level line: version = \"0.5\"".to_string())
     })?;
 
-    if version != "0.3" && version != "0.4" {
-        bail!("DSL pleasefile requires version = \"0.3\" or \"0.4\"; found '{version}'");
+    if version != "0.3" && version != "0.4" && version != "0.5" {
+        bail!("DSL pleasefile requires version = \"0.3\", \"0.4\", or \"0.5\"; found '{version}'");
     }
 
     if tasks.is_empty() {
@@ -341,6 +367,10 @@ pub fn parse_pleasefile_dsl_with_workspace(
                 isolation: draft.isolation,
                 mode: draft.mode,
                 working_dir: draft.working_dir,
+                params: draft.params,
+                private: draft.private,
+                confirm: draft.confirm,
+                shell_override: None,
                 requires: draft.requires,
             },
         );
@@ -372,7 +402,7 @@ fn parse_version_line(line: &str, line_no: usize) -> Result<Option<String>> {
         return Err(parse_error(
             line_no,
             1,
-            "invalid version declaration; expected version = \"0.3\"".to_string(),
+            "invalid version declaration; expected version = \"0.5\"".to_string(),
         ));
     };
 
@@ -460,12 +490,20 @@ fn parse_variable_line(line: &str, line_no: usize) -> Result<Option<(String, Var
     Ok(Some((key.to_string(), VariableDef { kind, line_no })))
 }
 
-fn parse_task_header(line: &str, line_no: usize) -> Result<Option<(String, Vec<String>)>> {
+type ParsedTaskHeader = (String, Vec<TaskParamSpec>, Vec<String>);
+
+fn parse_task_header(
+    line: &str,
+    line_no: usize,
+) -> Result<Option<ParsedTaskHeader>> {
     let Some((name, deps_raw)) = line.split_once(':') else {
         return Ok(None);
     };
 
-    let task_name = name.trim();
+    let mut header_tokens = name.split_whitespace();
+    let Some(task_name) = header_tokens.next().map(str::trim) else {
+        return Err(parse_error(line_no, 1, "task name cannot be empty".to_string()));
+    };
     if task_name.is_empty() {
         return Err(parse_error(line_no, 1, "task name cannot be empty".to_string()));
     }
@@ -474,13 +512,60 @@ fn parse_task_header(line: &str, line_no: usize) -> Result<Option<(String, Vec<S
         return Err(parse_error(line_no, 1, format!("invalid task identifier '{}'", task_name)));
     }
 
+    let mut params = Vec::new();
+    let mut seen_params = BTreeSet::new();
+    for token in header_tokens {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if !(token.starts_with('[') && token.ends_with(']')) {
+            return Err(parse_error(
+                line_no,
+                1,
+                format!(
+                    "invalid task header token '{}'; expected [param] or [param=\"default\"]",
+                    token
+                ),
+            ));
+        }
+        let inner = token[1..token.len() - 1].trim();
+        if inner.is_empty() {
+            return Err(parse_error(line_no, 1, "empty task parameter declaration".to_string()));
+        }
+
+        let (param_name, default) = if let Some((left, right)) = inner.split_once('=') {
+            let param_name = left.trim();
+            let default = right.trim().trim_matches('"').trim_matches('\'').to_string();
+            (param_name, Some(default))
+        } else {
+            (inner, None)
+        };
+
+        if !is_variable_name(param_name) {
+            return Err(parse_error(
+                line_no,
+                1,
+                format!("invalid task parameter name '{}'", param_name),
+            ));
+        }
+        if !seen_params.insert(param_name.to_string()) {
+            return Err(parse_error(
+                line_no,
+                1,
+                format!("duplicate task parameter '{}'", param_name),
+            ));
+        }
+        params.push(TaskParamSpec { name: param_name.to_string(), default });
+    }
+
     let deps = deps_raw
         .split_whitespace()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect();
 
-    Ok(Some((task_name.to_string(), deps)))
+    Ok(Some((task_name.to_string(), params, deps)))
 }
 
 fn is_identifier(value: &str) -> bool {
@@ -525,6 +610,7 @@ fn resolve_variable(
         VariableKind::Static(value) => {
             let (interpolated, _) = interpolate_with_resolver(value, def.line_no, |ref_name| {
                 resolve_variable(ref_name, defs, resolved, resolving, workspace_root, def.line_no)
+                    .map(Some)
             })?;
             interpolated
         }
@@ -539,6 +625,7 @@ fn resolve_variable(
                         workspace_root,
                         def.line_no,
                     )
+                    .map(Some)
                 })?;
             run_dynamic_variable_command(&interpolated_command, workspace_root, def.line_no)?
         }
@@ -555,10 +642,18 @@ fn interpolate_template_with_defs(
     defs: &BTreeMap<String, VariableDef>,
     resolved: &mut BTreeMap<String, String>,
     workspace_root: Option<&Path>,
+    allow_deferred: Option<&BTreeSet<String>>,
 ) -> Result<(String, BTreeSet<String>)> {
     let mut resolving = BTreeSet::new();
     interpolate_with_resolver(input, line_no, |name| {
-        resolve_variable(name, defs, resolved, &mut resolving, workspace_root, line_no)
+        if defs.contains_key(name) {
+            return resolve_variable(name, defs, resolved, &mut resolving, workspace_root, line_no)
+                .map(Some);
+        }
+        if allow_deferred.is_some_and(|allowed| allowed.contains(name)) {
+            return Ok(None);
+        }
+        Err(parse_error(line_no, 1, format!("unknown variable '{}'", name)))
     })
 }
 
@@ -568,7 +663,7 @@ fn interpolate_with_resolver<F>(
     mut resolver: F,
 ) -> Result<(String, BTreeSet<String>)>
 where
-    F: FnMut(&str) -> Result<String>,
+    F: FnMut(&str) -> Result<Option<String>>,
 {
     let mut output = String::with_capacity(input.len());
     let mut used = BTreeSet::new();
@@ -594,6 +689,11 @@ where
                 "empty variable interpolation; expected variable name".to_string(),
             ));
         }
+        if let Some(value) = evaluate_builtin_expr(key, line_no, start + 1)? {
+            output.push_str(&value);
+            cursor = close + 2;
+            continue;
+        }
         if !is_variable_name(key) {
             return Err(parse_error(
                 line_no,
@@ -604,13 +704,91 @@ where
         let value = resolver(key).with_context(|| {
             format!("resolving variable '{}' at {}:{}", key, line_no, start + 1)
         })?;
-        used.insert(key.to_string());
-        output.push_str(&value);
+        if let Some(value) = value {
+            used.insert(key.to_string());
+            output.push_str(&value);
+        } else {
+            output.push_str(&format!("{{{{ {} }}}}", key));
+        }
         cursor = close + 2;
     }
 
     output.push_str(&input[cursor..]);
     Ok((output, used))
+}
+
+fn evaluate_builtin_expr(expr: &str, line_no: usize, column: usize) -> Result<Option<String>> {
+    if expr == "os()" {
+        return Ok(Some(env::consts::OS.to_string()));
+    }
+    if expr == "arch()" {
+        return Ok(Some(env::consts::ARCH.to_string()));
+    }
+    if !expr.starts_with("env(") {
+        return Ok(None);
+    }
+    if !expr.ends_with(')') {
+        return Err(parse_error(
+            line_no,
+            column,
+            "invalid env() builtin; expected env(\"KEY\", \"default\")".to_string(),
+        ));
+    }
+    let inner = &expr[4..expr.len() - 1];
+    let args = parse_env_builtin_args(inner, line_no, column)?;
+    if args.is_empty() || args.len() > 2 {
+        return Err(parse_error(line_no, column, "env() expects 1 or 2 arguments".to_string()));
+    }
+    let key = &args[0];
+    if key.is_empty() {
+        return Err(parse_error(line_no, column, "env() key cannot be empty".to_string()));
+    }
+    if let Ok(value) = env::var(key) {
+        return Ok(Some(value));
+    }
+    if let Some(default) = args.get(1) {
+        return Ok(Some(default.clone()));
+    }
+    Ok(Some(String::new()))
+}
+
+fn parse_env_builtin_args(inner: &str, line_no: usize, column: usize) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    for ch in inner.chars() {
+        if let Some(q) = in_quote {
+            if ch == q {
+                in_quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => in_quote = Some(ch),
+            ',' => {
+                args.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if in_quote.is_some() {
+        return Err(parse_error(
+            line_no,
+            column,
+            "unterminated quote in env() builtin".to_string(),
+        ));
+    }
+    if !current.trim().is_empty() || inner.contains(',') {
+        args.push(current.trim().to_string());
+    }
+    Ok(args)
+}
+
+fn task_param_names(task: &TaskDraft) -> BTreeSet<String> {
+    task.params.iter().map(|param| param.name.clone()).collect()
 }
 
 fn run_dynamic_variable_command(
@@ -687,12 +865,9 @@ fn parse_error(line: usize, column: usize, message: String) -> anyhow::Error {
         if let Some(source) = slot.borrow().as_ref() {
             let offset = line_col_to_offset(source, line, column);
             let span_end = (offset + 1).min(source.len().max(1));
-            let report = miette!(
-                labels = vec![LabeledSpan::at(offset..span_end, "here")],
-                "{}",
-                formatted
-            )
-            .with_source_code(source.clone());
+            let report =
+                miette!(labels = vec![LabeledSpan::at(offset..span_end, "here")], "{}", formatted)
+                    .with_source_code(source.clone());
             anyhow!(report)
         } else {
             anyhow!(formatted)

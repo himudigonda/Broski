@@ -108,12 +108,18 @@ fn run() -> Result<()> {
             let config = load_and_validate(&workspace)?;
             let graph = TaskGraph::build(&config.task)?;
             for task in graph.all_tasks_sorted() {
+                if config.task.get(&task).is_some_and(|spec| spec.private) {
+                    continue;
+                }
                 match config.task.get(&task).and_then(|spec| spec.description.as_deref()) {
                     Some(description) => println!("{task}\t- {description}"),
                     None => println!("{task}"),
                 }
             }
             for (alias, target) in &config.alias {
+                if config.task.get(target).is_some_and(|spec| spec.private) {
+                    continue;
+                }
                 println!("alias {alias} -> {target}");
             }
             Ok(())

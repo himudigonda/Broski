@@ -173,6 +173,10 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            params: Vec::new(),
+            private: false,
+            confirm: None,
+            shell_override: None,
             requires: Vec::new(),
         }
     }
@@ -247,6 +251,10 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            params: Vec::new(),
+            private: false,
+            confirm: None,
+            shell_override: None,
             requires: Vec::new(),
         };
         let resolved = vec![PathBuf::from("src/missing.txt")];
@@ -280,6 +288,10 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            params: Vec::new(),
+            private: false,
+            confirm: None,
+            shell_override: None,
             requires: Vec::new(),
         };
 

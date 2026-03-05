@@ -361,12 +361,17 @@ impl Executor {
             .task
             .get(task_name)
             .ok_or_else(|| anyhow!("task '{}' not found", task_name))?;
+        let (task, passthrough_args) =
+            self.resolve_task_with_params(task_name, task, &options.passthrough_args)?;
         let task_mode = task.inferred_mode();
+        if !options.dry_run {
+            self.require_task_confirmation(task_name, &task)?;
+        }
         let show_progress = task_mode != TaskMode::Interactive;
         if show_progress {
             emit_progress(&progress, ProgressEvent::TaskStarted(task_name.to_string()));
         }
-        let (resolved_env, secret_env_keys) = self.resolve_task_env(task)?;
+        let (resolved_env, secret_env_keys) = self.resolve_task_env(&task)?;
         let redactor = SecretRedactor::from_env(&resolved_env, &secret_env_keys);
 
         if task_mode == TaskMode::Interactive {
@@ -401,10 +406,10 @@ impl Executor {
 
             self.run_interactive_command(
                 task_name,
-                task,
+                &task,
                 &resolved_env,
                 redactor.as_ref(),
-                options,
+                &passthrough_args,
             )
             .with_context(|| format!("executing interactive task '{}'", task_name))?;
             if show_progress {
@@ -428,16 +433,16 @@ impl Executor {
             });
         }
 
-        let outputs = normalize_outputs(task)?;
+        let outputs = normalize_outputs(&task)?;
         let inputs = resolve_inputs(&self.workspace_root, &task.inputs)?;
         let fingerprint_result = compute_fingerprint(
             &self.workspace_root,
             task_name,
-            task,
+            &task,
             &inputs,
             &resolved_env,
             &secret_env_keys,
-            &options.passthrough_args,
+            &passthrough_args,
         )?;
         let mut cache_miss_reasons = Vec::new();
 
@@ -507,7 +512,14 @@ impl Executor {
 
         let stage = self.create_stage_snapshot(task_name)?;
         let output = self
-            .run_task_command(task_name, task, stage.path(), &resolved_env, options)
+            .run_task_command(
+                task_name,
+                &task,
+                stage.path(),
+                &resolved_env,
+                &passthrough_args,
+                options,
+            )
             .with_context(|| format!("executing task '{}'", task_name))?;
         let output = redact_output(output, redactor.as_ref());
 
@@ -605,10 +617,11 @@ impl Executor {
         task: &TaskSpec,
         stage_workspace: &Path,
         resolved_env: &BTreeMap<String, String>,
+        passthrough_args: &[String],
         options: &RunOptions,
     ) -> Result<Output> {
         let isolation_mode = selected_isolation(task, options);
-        let shell_command = build_shell_command(task, &options.passthrough_args);
+        let shell_command = build_shell_command(task, passthrough_args);
 
         let mut command = match isolation_mode {
             IsolationMode::Strict if cfg!(target_os = "linux") => {
@@ -677,9 +690,9 @@ impl Executor {
         task: &TaskSpec,
         resolved_env: &BTreeMap<String, String>,
         redactor: Option<&SecretRedactor>,
-        options: &RunOptions,
+        passthrough_args: &[String],
     ) -> Result<()> {
-        let shell_command = build_shell_command(task, &options.passthrough_args);
+        let shell_command = build_shell_command(task, passthrough_args);
         println!("[{task_name}] $ {shell_command}");
 
         let mut command = Command::new("/bin/sh");
@@ -719,6 +732,97 @@ impl Executor {
         } else {
             Err(anyhow!("interactive task '{}' failed with status {}", task_name, status))
         }
+    }
+
+    fn resolve_task_with_params(
+        &self,
+        task_name: &str,
+        task: &TaskSpec,
+        cli_args: &[String],
+    ) -> Result<(TaskSpec, Vec<String>)> {
+        let mut resolved = task.clone();
+        if task.params.is_empty() {
+            return Ok((resolved, cli_args.to_vec()));
+        }
+
+        let mut bindings = BTreeMap::new();
+        let mut cursor = 0usize;
+        for param in &task.params {
+            let value =
+                cli_args.get(cursor).cloned().or_else(|| param.default.clone()).ok_or_else(
+                    || {
+                        anyhow!(
+                            "task '{}' requires parameter '{}' (usage: {} {})",
+                            task_name,
+                            param.name,
+                            task_name,
+                            task.params
+                                .iter()
+                                .map(|item| {
+                                    if item.default.is_some() {
+                                        format!("[{}]", item.name)
+                                    } else {
+                                        format!("<{}>", item.name)
+                                    }
+                                })
+                                .collect::<Vec<String>>()
+                                .join(" ")
+                        )
+                    },
+                )?;
+            bindings.insert(param.name.clone(), value);
+            cursor += 1;
+        }
+
+        let passthrough_tail = cli_args[cursor..].to_vec();
+
+        for (key, value) in &bindings {
+            resolved.resolved_variables.insert(key.clone(), value.clone());
+        }
+
+        resolved.inputs =
+            resolved.inputs.iter().map(|value| apply_param_bindings(value, &bindings)).collect();
+        resolved.outputs =
+            resolved.outputs.iter().map(|value| apply_param_bindings(value, &bindings)).collect();
+        resolved.env = resolved
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), apply_param_bindings(value, &bindings)))
+            .collect();
+        resolved.working_dir =
+            resolved.working_dir.as_ref().map(|value| apply_param_bindings(value, &bindings));
+        resolved.run = match &resolved.run {
+            crate::model::RunSpec::Shell(command) => {
+                crate::model::RunSpec::Shell(apply_param_bindings(command, &bindings))
+            }
+            crate::model::RunSpec::Args(args) => crate::model::RunSpec::Args(
+                args.iter().map(|value| apply_param_bindings(value, &bindings)).collect(),
+            ),
+        };
+
+        Ok((resolved, passthrough_tail))
+    }
+
+    fn require_task_confirmation(&self, task_name: &str, task: &TaskSpec) -> Result<()> {
+        let Some(prompt) = task.confirm.as_deref() else {
+            return Ok(());
+        };
+        if !io::stdin().is_terminal() {
+            return Err(anyhow!(
+                "task '{}' requires confirmation but stdin is not interactive",
+                task_name
+            ));
+        }
+
+        eprint!("{prompt} ");
+        io::stderr().flush().context("flushing confirmation prompt")?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).context("reading confirmation response")?;
+        let answer = answer.trim().to_ascii_lowercase();
+        if answer == "y" || answer == "yes" {
+            return Ok(());
+        }
+        Err(anyhow!("task '{}' aborted by user", task_name))
     }
 
     fn resolve_task_env(
@@ -979,6 +1083,30 @@ fn build_shell_command(task: &TaskSpec, passthrough_args: &[String]) -> String {
         command.push_str(&joined);
     }
     command
+}
+
+fn apply_param_bindings(input: &str, bindings: &BTreeMap<String, String>) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    while let Some(rel_start) = input[cursor..].find("{{") {
+        let start = cursor + rel_start;
+        output.push_str(&input[cursor..start]);
+        let open_end = start + 2;
+        let Some(rel_close) = input[open_end..].find("}}") else {
+            output.push_str(&input[start..]);
+            return output;
+        };
+        let close = open_end + rel_close;
+        let key = input[open_end..close].trim();
+        if let Some(value) = bindings.get(key) {
+            output.push_str(value);
+        } else {
+            output.push_str(&input[start..close + 2]);
+        }
+        cursor = close + 2;
+    }
+    output.push_str(&input[cursor..]);
+    output
 }
 
 fn shell_escape(input: &str) -> String {
@@ -1272,6 +1400,10 @@ mod tests {
             isolation: Some(IsolationMode::BestEffort),
             mode: Some(TaskMode::Graph),
             working_dir: None,
+            params: Vec::new(),
+            private: false,
+            confirm: None,
+            shell_override: None,
             requires: Vec::new(),
         }
     }
@@ -1486,6 +1618,10 @@ mod tests {
                 isolation: Some(IsolationMode::Strict),
                 mode: Some(TaskMode::Graph),
                 working_dir: None,
+                params: Vec::new(),
+                private: false,
+                confirm: None,
+                shell_override: None,
                 requires: Vec::new(),
             },
         );
@@ -1532,6 +1668,10 @@ mod tests {
                 isolation: Some(IsolationMode::Off),
                 mode: Some(TaskMode::Graph),
                 working_dir: None,
+                params: Vec::new(),
+                private: false,
+                confirm: None,
+                shell_override: None,
                 requires: Vec::new(),
             },
         );
