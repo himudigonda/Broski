@@ -13,7 +13,7 @@
 - Built-in interpolation helpers: `os()`, `arch()`, `env()`.
 - Shebang task bodies for embedded polyglot scripts.
 - Improved diagnostics via `miette` source spans.
-- Cross-platform shell resolution with Windows support (`pwsh` -> `cmd`).
+- Runtime shell resolution includes Windows logic (`pwsh` -> `cmd`), but release artifacts for v0.5 are Linux/macOS only.
 
 ## Compatibility
 - DSL `version = "0.3"` and `version = "0.4"` remain supported with warnings.
@@ -23,7 +23,6 @@
 ## Release artifacts
 - `please-v0.5.0-x86_64-unknown-linux-gnu.tar.gz`
 - `please-v0.5.0-aarch64-apple-darwin.tar.gz`
-- `please-v0.5.0-x86_64-pc-windows-msvc.zip`
 - `SHA256SUMS.txt`
 
 ## Validation evidence

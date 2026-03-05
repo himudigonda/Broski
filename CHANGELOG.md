@@ -18,7 +18,7 @@ All notable changes to this project are documented in this file.
   - `@confirm` to require explicit user confirmation before execution.
 - Built-in interpolation functions:
   - `{{ os() }}`, `{{ arch() }}`, `{{ env("KEY", "default") }}`.
-- Release matrix now publishes Windows artifact (`x86_64-pc-windows-msvc`).
+- Release matrix publishes stable artifacts for Linux and macOS.
 
 ### Changed
 - Workspace and crate version bumped to `0.5.0`.

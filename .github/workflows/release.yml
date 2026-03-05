@@ -32,10 +32,6 @@ jobs:
             target: aarch64-apple-darwin
             binary_name: please
             archive_ext: tar.gz
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary_name: please.exe
-            archive_ext: zip
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -51,7 +47,6 @@ jobs:
         run: cargo build --release -p please-cli --target ${{ matrix.target }}
 
       - name: Package artifact (Linux/macOS)
-        if: matrix.os != 'windows-latest'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -64,20 +59,6 @@ jobs:
           asset="please-${RELEASE_TAG}-${TARGET}.${ARCHIVE_EXT}"
           tar -C "$(dirname "$bin_path")" -czf "dist/${asset}" "$(basename "$bin_path")"
           echo "created dist/${asset}"
-
-      - name: Package artifact (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        env:
-          TARGET: ${{ matrix.target }}
-          BINARY_NAME: ${{ matrix.binary_name }}
-          ARCHIVE_EXT: ${{ matrix.archive_ext }}
-        run: |
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $binPath = "target/$env:TARGET/release/$env:BINARY_NAME"
-          $asset = "please-$env:RELEASE_TAG-$env:TARGET.$env:ARCHIVE_EXT"
-          Compress-Archive -Path $binPath -DestinationPath "dist/$asset" -Force
-          Write-Host "created dist/$asset"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

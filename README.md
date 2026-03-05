@@ -17,7 +17,6 @@
 Published artifacts:
 - `x86_64-unknown-linux-gnu`
 - `aarch64-apple-darwin`
-- `x86_64-pc-windows-msvc`
 
 Install latest stable (default):
 ```bash
@@ -75,7 +74,7 @@ web:
 - Built-ins in interpolation: `{{ os() }}`, `{{ arch() }}`, `{{ env("KEY", "default") }}`.
 - Shebang task bodies (`#!`) for embedded polyglot scripts.
 - Subcommand-first CLI precedence with implicit task run.
-- Windows shell support (`pwsh` first, `cmd` fallback).
+- Windows runtime support is implemented in core, but official release artifacts for `v0.5.x` are Linux/macOS only.
 
 ## Compatibility
 - TOML `pleasefile` (deprecated warning).

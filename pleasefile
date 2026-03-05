@@ -36,7 +36,7 @@ cov: test
     if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
       cargo install --locked cargo-llvm-cov
     fi
-    cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines ${PLEASE_COVERAGE_MIN:-45}
+    cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines ${PLEASE_COVERAGE_MIN:-50}
     printf 'ok\n' > .please/stamps/cov.ok
 
 ci: cov

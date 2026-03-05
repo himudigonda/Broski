@@ -5,7 +5,7 @@ This runbook covers cutting and publishing `v0.5.0` for `himudigonda/Please`.
 
 ## Preconditions
 - `develop` is clean and synced.
-- Required CI jobs are green (Linux, macOS, Windows, showcase).
+- Required CI jobs are green (Linux, macOS, showcase).
 - You have permission to push tags and publish releases.
 
 ## Cut checklist
@@ -30,7 +30,6 @@ This runbook covers cutting and publishing `v0.5.0` for `himudigonda/Please`.
 7. Validate release artifacts:
    - `please-v0.5.0-x86_64-unknown-linux-gnu.tar.gz`
    - `please-v0.5.0-aarch64-apple-darwin.tar.gz`
-   - `please-v0.5.0-x86_64-pc-windows-msvc.zip`
    - `SHA256SUMS.txt`
 
 ## Post-publish validation

@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -39,18 +39,16 @@ jobs:
 
       - name: Run quality gate (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: ./target/debug/please --workspace . run ci
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
+          cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines ${PLEASE_COVERAGE_MIN:-50}
 
       - name: Run quality gate (macOS fast path)
         if: matrix.os == 'macos-latest'
         run: ./target/debug/please --workspace . run test
 
-      - name: Run quality gate (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          cargo fmt --all --check
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
-          cargo test --workspace
 
   showcase:
     runs-on: ubuntu-latest
