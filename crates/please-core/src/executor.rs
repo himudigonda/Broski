@@ -18,7 +18,7 @@ use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, W
 use please_cache::unix_timestamp_secs;
 use please_store::{ArtifactStore, ExecutionRecord};
 use rayon::prelude::*;
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::fingerprint::compute_fingerprint;
@@ -621,7 +621,7 @@ impl Executor {
         options: &RunOptions,
     ) -> Result<Output> {
         let isolation_mode = selected_isolation(task, options);
-        let shell_command = build_shell_command(task, passthrough_args);
+        let invocation = prepare_task_invocation(stage_workspace, task, passthrough_args)?;
 
         let mut command = match isolation_mode {
             IsolationMode::Strict if cfg!(target_os = "linux") => {
@@ -645,10 +645,9 @@ impl Executor {
                     .arg("--tmpfs")
                     .arg("/tmp")
                     .arg("--chdir")
-                    .arg(stage_workspace)
-                    .arg("/bin/sh")
-                    .arg("-lc")
-                    .arg(&shell_command);
+                    .arg(stage_workspace);
+                cmd.arg(&invocation.program);
+                cmd.args(&invocation.args);
                 cmd
             }
             IsolationMode::Strict => {
@@ -657,8 +656,8 @@ impl Executor {
                 ));
             }
             IsolationMode::BestEffort | IsolationMode::Off => {
-                let mut cmd = Command::new("/bin/sh");
-                cmd.arg("-lc").arg(&shell_command);
+                let mut cmd = Command::new(&invocation.program);
+                cmd.args(&invocation.args);
                 cmd
             }
         };
@@ -681,7 +680,9 @@ impl Executor {
             command.env(key, value);
         }
 
-        command.output().with_context(|| format!("spawning task command '{}'", shell_command))
+        command
+            .output()
+            .with_context(|| format!("spawning task command '{}'", invocation.display_command))
     }
 
     fn run_interactive_command(
@@ -692,11 +693,11 @@ impl Executor {
         redactor: Option<&SecretRedactor>,
         passthrough_args: &[String],
     ) -> Result<()> {
-        let shell_command = build_shell_command(task, passthrough_args);
-        println!("[{task_name}] $ {shell_command}");
+        let invocation = prepare_task_invocation(&self.workspace_root, task, passthrough_args)?;
+        println!("[{task_name}] $ {}", invocation.display_command);
 
-        let mut command = Command::new("/bin/sh");
-        command.arg("-lc").arg(&shell_command);
+        let mut command = Command::new(&invocation.program);
+        command.args(&invocation.args);
         command
             .current_dir(resolve_execution_dir(&self.workspace_root, task.working_dir.as_deref())?);
         command.stdin(Stdio::inherit());
@@ -712,7 +713,7 @@ impl Executor {
 
         let status = if let Some(redactor) = redactor {
             let output = command.output().with_context(|| {
-                format!("spawning interactive task command '{}'", shell_command)
+                format!("spawning interactive task command '{}'", invocation.display_command)
             })?;
             let output = redact_output(output, Some(redactor));
             io::stdout()
@@ -723,9 +724,9 @@ impl Executor {
                 .context("writing redacted interactive stderr")?;
             output.status
         } else {
-            command
-                .status()
-                .with_context(|| format!("spawning interactive task command '{}'", shell_command))?
+            command.status().with_context(|| {
+                format!("spawning interactive task command '{}'", invocation.display_command)
+            })?
         };
         if status.success() {
             Ok(())
@@ -1071,8 +1072,108 @@ fn redact_output(mut output: Output, redactor: Option<&SecretRedactor>) -> Outpu
     output
 }
 
-fn build_shell_command(task: &TaskSpec, passthrough_args: &[String]) -> String {
-    let mut command = task.run_as_shell();
+struct TaskInvocation {
+    display_command: String,
+    program: PathBuf,
+    args: Vec<String>,
+    _temp_script: Option<NamedTempFile>,
+}
+
+fn prepare_task_invocation(
+    execution_root: &Path,
+    task: &TaskSpec,
+    passthrough_args: &[String],
+) -> Result<TaskInvocation> {
+    let run_command = task.run_as_shell();
+    if looks_like_shebang(&run_command) {
+        let script = create_temp_shebang_script(execution_root, &run_command)?;
+        let display_command = if passthrough_args.is_empty() {
+            script.path().display().to_string()
+        } else {
+            format!(
+                "{} {}",
+                script.path().display(),
+                passthrough_args
+                    .iter()
+                    .map(|part| shell_escape(part))
+                    .collect::<Vec<String>>()
+                    .join(" ")
+            )
+        };
+        return Ok(TaskInvocation {
+            display_command,
+            program: script.path().to_path_buf(),
+            args: passthrough_args.to_vec(),
+            _temp_script: Some(script),
+        });
+    }
+
+    let shell_command = build_shell_command(&run_command, passthrough_args);
+    let (program, mut args) = resolve_shell_command(task.shell_override.as_ref())?;
+    args.push(shell_command.clone());
+    Ok(TaskInvocation { display_command: shell_command, program, args, _temp_script: None })
+}
+
+fn create_temp_shebang_script(execution_root: &Path, script_body: &str) -> Result<NamedTempFile> {
+    let script_dir = execution_root.join(".please/tmp");
+    fs::create_dir_all(&script_dir)
+        .with_context(|| format!("creating shebang temp directory '{}'", script_dir.display()))?;
+    let mut script = tempfile::Builder::new()
+        .prefix("please-script-")
+        .tempfile_in(&script_dir)
+        .with_context(|| format!("creating shebang temp script in '{}'", script_dir.display()))?;
+    script
+        .as_file_mut()
+        .write_all(script_body.as_bytes())
+        .context("writing shebang script body")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms =
+            script.as_file().metadata().context("reading shebang script metadata")?.permissions();
+        perms.set_mode(0o700);
+        script
+            .as_file()
+            .set_permissions(perms)
+            .context("setting shebang script executable permissions")?;
+    }
+    Ok(script)
+}
+
+fn resolve_shell_command(
+    shell_override: Option<&crate::model::ShellSpec>,
+) -> Result<(PathBuf, Vec<String>)> {
+    if let Some(shell_spec) = shell_override {
+        if shell_spec.program.trim().is_empty() {
+            return Err(anyhow!("shell override program cannot be empty"));
+        }
+        return Ok((PathBuf::from(shell_spec.program.clone()), shell_spec.args.clone()));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(pwsh) = which::which("pwsh") {
+            return Ok((pwsh, vec!["-NoProfile".to_string(), "-Command".to_string()]));
+        }
+        if let Ok(cmd) = which::which("cmd") {
+            return Ok((cmd, vec!["/C".to_string()]));
+        }
+        return Ok((PathBuf::from("cmd.exe"), vec!["/C".to_string()]));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok((PathBuf::from("/bin/sh"), vec!["-lc".to_string()]))
+    }
+}
+
+fn looks_like_shebang(script: &str) -> bool {
+    let first_non_empty = script.lines().find(|line| !line.trim().is_empty());
+    first_non_empty.is_some_and(|line| line.trim_start().starts_with("#!"))
+}
+
+fn build_shell_command(run_command: &str, passthrough_args: &[String]) -> String {
+    let mut command = run_command.to_string();
     if !passthrough_args.is_empty() {
         let joined = passthrough_args
             .iter()
@@ -1552,6 +1653,66 @@ mod tests {
         assert!(!stderr.contains("supersecret"));
         assert!(stdout.contains("[REDACTED]"));
         assert!(stderr.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn shebang_invocation_uses_temp_script_and_cleans_up() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let task = TaskSpec {
+            deps: vec![],
+            description: None,
+            resolved_variables: BTreeMap::new(),
+            inputs: vec![],
+            outputs: vec![],
+            env: BTreeMap::new(),
+            env_inherit: Vec::new(),
+            secret_env: Vec::new(),
+            run: RunSpec::Shell("#!/usr/bin/env sh\necho hello".to_string()),
+            isolation: Some(IsolationMode::Off),
+            mode: Some(TaskMode::Interactive),
+            working_dir: None,
+            params: Vec::new(),
+            private: false,
+            confirm: None,
+            shell_override: None,
+            requires: Vec::new(),
+        };
+
+        let invocation = prepare_task_invocation(tmp.path(), &task, &[]).expect("invocation");
+        let script_path = invocation.program.clone();
+        assert!(script_path.exists(), "expected temporary shebang script to exist");
+        drop(invocation);
+        assert!(
+            !script_path.exists(),
+            "temporary shebang script should be removed when invocation is dropped"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn default_shell_is_posix_sh() {
+        let (program, args) = resolve_shell_command(None).expect("resolve shell");
+        assert_eq!(program, PathBuf::from("/bin/sh"));
+        assert_eq!(args, vec!["-lc".to_string()]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn default_shell_prefers_pwsh_then_cmd() {
+        let (program, args) = resolve_shell_command(None).expect("resolve shell");
+        let name = program.file_name().and_then(|part| part.to_str()).unwrap_or_default();
+        assert!(
+            name.eq_ignore_ascii_case("pwsh.exe")
+                || name.eq_ignore_ascii_case("pwsh")
+                || name.eq_ignore_ascii_case("cmd.exe")
+                || name.eq_ignore_ascii_case("cmd"),
+            "unexpected shell program: {}",
+            program.display()
+        );
+        assert!(
+            args == vec!["-NoProfile".to_string(), "-Command".to_string()]
+                || args == vec!["/C".to_string()]
+        );
     }
 
     #[cfg(target_os = "linux")]

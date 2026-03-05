@@ -492,10 +492,7 @@ fn parse_variable_line(line: &str, line_no: usize) -> Result<Option<(String, Var
 
 type ParsedTaskHeader = (String, Vec<TaskParamSpec>, Vec<String>);
 
-fn parse_task_header(
-    line: &str,
-    line_no: usize,
-) -> Result<Option<ParsedTaskHeader>> {
+fn parse_task_header(line: &str, line_no: usize) -> Result<Option<ParsedTaskHeader>> {
     let Some((name, deps_raw)) = line.split_once(':') else {
         return Ok(None);
     };
