@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -11,6 +12,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use miette::{miette, LabeledSpan};
 
 use crate::model::{PleaseFile, PleaseSection, RunSpec, TaskMode, TaskParamSpec, TaskSpec};
+use crate::resolver::normalize_relative_path;
+
+const IMPORT_DEPTH_LIMIT: usize = 10;
 
 thread_local! {
     static DSL_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -76,7 +80,9 @@ pub fn parse_pleasefile_dsl_with_workspace(
     content: &str,
     workspace_root: Option<&Path>,
 ) -> Result<PleaseFile> {
-    let _source_guard = DslSourceGuard::set(content.to_string());
+    let expanded_content = expand_imports(content, workspace_root, 0, &mut Vec::new())?;
+    let _source_guard = DslSourceGuard::set(expanded_content.clone());
+    let content = expanded_content.as_str();
 
     let mut version: Option<String> = None;
     let mut aliases = BTreeMap::new();
@@ -125,6 +131,23 @@ pub fn parse_pleasefile_dsl_with_workspace(
             }
 
             if let Some((alias, target)) = parse_alias_line(trimmed, line_no)? {
+                if aliases.contains_key(&alias) {
+                    return Err(parse_error(
+                        line_no,
+                        1,
+                        format!("name collision: alias '{}' is already defined", alias),
+                    ));
+                }
+                if variable_defs.contains_key(&alias) || tasks.contains_key(&alias) {
+                    return Err(parse_error(
+                        line_no,
+                        1,
+                        format!(
+                            "name collision: '{}' conflicts with existing variable/task",
+                            alias
+                        ),
+                    ));
+                }
                 aliases.insert(alias, target);
                 pending_task_comments.clear();
                 continue;
@@ -136,6 +159,20 @@ pub fn parse_pleasefile_dsl_with_workspace(
                         line_no,
                         1,
                         "variable declarations must appear before task headers".to_string(),
+                    ));
+                }
+                if variable_defs.contains_key(&name) {
+                    return Err(parse_error(
+                        line_no,
+                        1,
+                        format!("name collision: variable '{}' is already defined", name),
+                    ));
+                }
+                if aliases.contains_key(&name) || tasks.contains_key(&name) {
+                    return Err(parse_error(
+                        line_no,
+                        1,
+                        format!("name collision: '{}' conflicts with existing alias/task", name),
                     ));
                 }
                 variable_defs.insert(name, variable_def);
@@ -155,6 +192,16 @@ pub fn parse_pleasefile_dsl_with_workspace(
                 seen_task_header = true;
                 if tasks.contains_key(&task_name) {
                     return Err(parse_error(line_no, 1, format!("duplicate task '{}'", task_name)));
+                }
+                if aliases.contains_key(&task_name) || variable_defs.contains_key(&task_name) {
+                    return Err(parse_error(
+                        line_no,
+                        1,
+                        format!(
+                            "name collision: task '{}' conflicts with existing alias/variable",
+                            task_name
+                        ),
+                    ));
                 }
                 let description = if pending_task_comments.is_empty() {
                     None
@@ -186,7 +233,7 @@ pub fn parse_pleasefile_dsl_with_workspace(
             return Err(parse_error(
                 line_no,
                 1,
-                "expected 'version = \"0.4\"', variable declaration, '@load', 'alias', or '<task>: ...'"
+                "expected 'version = \"0.5\"', variable declaration, '@load', 'alias', or '<task>: ...'"
                     .to_string(),
             ));
         }
@@ -393,6 +440,110 @@ fn split_items(rest: &str, line_no: usize, directive: &str) -> Result<Vec<String
     Ok(values)
 }
 
+fn expand_imports(
+    content: &str,
+    workspace_root: Option<&Path>,
+    depth: usize,
+    import_stack: &mut Vec<PathBuf>,
+) -> Result<String> {
+    if depth > IMPORT_DEPTH_LIMIT {
+        return Err(anyhow!(
+            "import depth limit exceeded (>{}); chain: {}",
+            IMPORT_DEPTH_LIMIT,
+            import_stack
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<String>>()
+                .join(" -> ")
+        ));
+    }
+
+    let mut expanded = String::new();
+    let mut in_task_block = false;
+    for (line_idx, raw_line) in content.lines().enumerate() {
+        let line_no = line_idx + 1;
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+
+        if in_task_block && indented {
+            expanded.push_str(line);
+            expanded.push('\n');
+            continue;
+        }
+        in_task_block = false;
+
+        if let Some((_task_name, _params, _deps)) = parse_task_header(trimmed, line_no)? {
+            in_task_block = true;
+            expanded.push_str(line);
+            expanded.push('\n');
+            continue;
+        }
+
+        if let Some(path) = parse_import_line(trimmed, line_no)? {
+            let workspace_root = workspace_root.ok_or_else(|| {
+                parse_error(
+                    line_no,
+                    1,
+                    "@import requires workspace context; parse from a workspace root".to_string(),
+                )
+            })?;
+            let rel = normalize_relative_path(&path)
+                .with_context(|| format!("invalid @import path '{}'", path))?;
+            let import_path = workspace_root.join(rel);
+            let canonical = fs::canonicalize(&import_path).unwrap_or_else(|_| import_path.clone());
+
+            if import_stack.contains(&canonical) {
+                let mut chain: Vec<String> =
+                    import_stack.iter().map(|item| item.display().to_string()).collect();
+                chain.push(canonical.display().to_string());
+                return Err(anyhow!("circular import detected: {}", chain.join(" -> ")));
+            }
+
+            if depth == IMPORT_DEPTH_LIMIT {
+                return Err(anyhow!("import depth limit exceeded at '{}'", canonical.display()));
+            }
+
+            let imported_content = fs::read_to_string(&import_path).with_context(|| {
+                format!("reading imported pleasefile '{}'", import_path.display())
+            })?;
+            import_stack.push(canonical);
+            let nested =
+                expand_imports(&imported_content, Some(workspace_root), depth + 1, import_stack)?;
+            import_stack.pop();
+
+            expanded.push_str(&strip_imported_version_lines(&nested, true));
+            if !expanded.ends_with('\n') {
+                expanded.push('\n');
+            }
+            continue;
+        }
+
+        expanded.push_str(line);
+        expanded.push('\n');
+    }
+
+    Ok(expanded)
+}
+
+fn strip_imported_version_lines(content: &str, imported: bool) -> String {
+    if !imported {
+        return content.to_string();
+    }
+    let mut output = String::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if !indented && parse_version_line(trimmed, 1).ok().flatten().is_some() {
+            continue;
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
+}
+
 fn parse_version_line(line: &str, line_no: usize) -> Result<Option<String>> {
     if !line.starts_with("version") {
         return Ok(None);
@@ -413,6 +564,17 @@ fn parse_version_line(line: &str, line_no: usize) -> Result<Option<String>> {
     let raw = right.trim();
     let value = raw.trim_matches('"');
     Ok(Some(value.to_string()))
+}
+
+fn parse_import_line(line: &str, line_no: usize) -> Result<Option<String>> {
+    let Some(rest) = line.strip_prefix("@import") else {
+        return Ok(None);
+    };
+    let values = split_items(rest, line_no, "@import")?;
+    if values.len() != 1 {
+        return Err(parse_error(line_no, 1, "@import accepts exactly one file path".to_string()));
+    }
+    Ok(Some(values[0].clone()))
 }
 
 fn parse_load_line(line: &str, line_no: usize) -> Result<Option<String>> {
@@ -892,6 +1054,7 @@ fn line_col_to_offset(source: &str, line: usize, column: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn parses_basic_document() {
@@ -1071,5 +1234,59 @@ mod tests {
             build.description.as_deref(),
             Some("Build backend artifacts Uses Cargo release profile")
         );
+    }
+
+    #[test]
+    fn parses_imported_tasks() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        fs::create_dir_all(tmp.path().join("shared")).expect("create shared dir");
+        fs::write(
+            tmp.path().join("shared/pleasefile"),
+            "version = \"0.5\"\n\nprep:\n    echo prep\n",
+        )
+        .expect("write imported pleasefile");
+
+        let root = "version = \"0.5\"\n@import shared/pleasefile\n\nbuild: prep\n    @out dist/out.txt\n    echo hi > dist/out.txt\n";
+
+        let parsed = parse_pleasefile_dsl_with_workspace(root, Some(tmp.path())).expect("parse");
+        assert!(parsed.task.contains_key("prep"));
+        assert!(parsed.task.contains_key("build"));
+    }
+
+    #[test]
+    fn rejects_circular_imports() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            tmp.path().join("a.please"),
+            "version = \"0.5\"\n@import b.please\na:\n    echo a\n",
+        )
+        .expect("write a");
+        fs::write(
+            tmp.path().join("b.please"),
+            "version = \"0.5\"\n@import a.please\nb:\n    echo b\n",
+        )
+        .expect("write b");
+
+        let root = "version = \"0.5\"\n@import a.please\n\nroot:\n    echo root\n";
+
+        let error = parse_pleasefile_dsl_with_workspace(root, Some(tmp.path()))
+            .expect_err("circular imports should fail");
+        assert!(error.to_string().contains("circular import detected"));
+    }
+
+    #[test]
+    fn rejects_import_name_collisions() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        fs::write(tmp.path().join("first.please"), "version = \"0.5\"\nbuild:\n    echo first\n")
+            .expect("write first");
+        fs::write(tmp.path().join("second.please"), "version = \"0.5\"\nbuild:\n    echo second\n")
+            .expect("write second");
+
+        let root = "version = \"0.5\"\n@import first.please\n@import second.please\n\nroot:\n    echo root\n";
+
+        let error = parse_pleasefile_dsl_with_workspace(root, Some(tmp.path()))
+            .expect_err("name collisions should fail");
+        let message = error.to_string();
+        assert!(message.contains("duplicate task") || message.contains("name collision"));
     }
 }
