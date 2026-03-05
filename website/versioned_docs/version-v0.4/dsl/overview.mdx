@@ -1,0 +1,25 @@
+---
+sidebar_position: 1
+---
+
+# DSL Overview (`version = "0.5"`)
+
+Core shape:
+
+```text
+version = "0.5"
+alias b = build
+
+build [target] [mode="release"]: deps...
+    @in ...
+    @out ...
+    @env KEY=value
+    @secret_env TOKEN
+    @dir apps/api
+    @requires cargo
+    @mode graph
+    @isolation off
+    run command
+```
+
+See subpages for exact semantics.

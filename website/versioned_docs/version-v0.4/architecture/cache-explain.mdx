@@ -1,0 +1,26 @@
+---
+sidebar_position: 2
+---
+
+# Cache Explainability
+
+Use `--explain` to understand why a graph task reran.
+
+```bash
+please run build --explain
+```
+
+```mermaid
+flowchart LR
+  P[Previous manifest] --> C[Compare]
+  N[Current manifest] --> C
+  C --> R[Changed / Added / Removed reasons]
+```
+
+Typical reasons include:
+
+- `input changed`
+- `env changed`
+- `task parameter changed`
+- `command changed`
+- `interactive mode bypass`

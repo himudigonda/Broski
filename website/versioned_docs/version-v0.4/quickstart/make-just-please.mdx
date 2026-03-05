@@ -1,0 +1,26 @@
+---
+sidebar_position: 3
+---
+
+import ToolComparison from '@site/src/components/ToolComparison';
+
+# Make vs Just vs Please
+
+## Define a build task
+
+<ToolComparison
+  language="text"
+  pleaseCode={`build [target] [mode="release"]:\n    @in src/**/* Cargo.toml\n    @out dist/{{ target }}\n    cargo build --bin {{ target }} --{{ mode }}`}
+  makeCode={`build:\n\tcargo build --release`}
+  justCode={`build target mode="release":\n  cargo build --bin {{target}} --{{mode}}`}
+/>
+
+## Why teams choose Please
+
+| Capability | Make | Just | Please |
+| --- | --- | --- | --- |
+| Content hashing | No | No | Yes (BLAKE3) |
+| DAG graph execution | Partial/manual | Basic | First-class |
+| Interactive mode | Native | Native | Native |
+| Cache explainability | No | No | `--explain` |
+| ACID output promotion | No | No | Yes |

@@ -1,0 +1,17 @@
+---
+sidebar_position: 2
+---
+
+# Watch Mode
+
+```bash
+please run test --watch
+```
+
+Behavior:
+
+- reruns target graph on input changes
+- ignores `.git`, `.please`, and declared outputs
+- debounced to avoid rerun storms
+
+Interactive tasks may already watch files internally; combining external and internal watchers can duplicate triggers.

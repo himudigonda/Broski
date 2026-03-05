@@ -1,0 +1,13 @@
+---
+sidebar_position: 1
+---
+
+# Security
+
+Key controls:
+
+- `@secret_env` redacts secret values from live output and persisted logs
+- explain output avoids leaking secret values
+- runtime health and orphan lock recovery via `please doctor`
+
+Recommendation: keep secrets out of committed task files and inject from environment/runtime secret stores.

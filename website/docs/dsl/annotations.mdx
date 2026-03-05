@@ -1,0 +1,31 @@
+---
+sidebar_position: 3
+---
+
+# Annotations
+
+## Inputs / Outputs
+
+```text
+@in src/**/* Cargo.toml
+@out dist/app
+```
+
+## Environment
+
+```text
+@env RUST_LOG=info
+@env HOME
+@secret_env API_TOKEN
+```
+
+## Runtime context
+
+```text
+@dir services/api
+@mode graph
+@isolation off
+@requires cargo docker
+```
+
+Graph mode requires outputs; interactive mode does not.

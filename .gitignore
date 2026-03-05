@@ -9,9 +9,12 @@ examples/showcase/artifacts/
 examples/showcase/backend/target/
 examples/showcase/frontend/dist/
 examples/showcase/frontend/node_modules/
-dumper.sh
 examples/**/.please/
 examples/**/dist/
 examples/**/build/
 examples/**/target/
 examples/**/node_modules/
+website/node_modules/
+website/.docusaurus/
+website/build/
+website/.husky/

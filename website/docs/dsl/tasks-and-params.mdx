@@ -1,0 +1,22 @@
+---
+sidebar_position: 2
+---
+
+# Task Headers and Parameters
+
+Required and default params:
+
+```text
+build [target] [mode="release"]:
+    cargo build --bin {{ target }} --{{ mode }}
+```
+
+Invocation examples:
+
+```bash
+please build api
+please build api debug
+please run build api debug --explain
+```
+
+Missing required params fail before execution.

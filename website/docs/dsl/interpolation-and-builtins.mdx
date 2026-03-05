@@ -1,0 +1,16 @@
+---
+sidebar_position: 4
+---
+
+# Interpolation and Built-ins
+
+Interpolation syntax:
+
+```text
+{{ VAR }}
+{{ os() }}
+{{ arch() }}
+{{ env("KEY", "default") }}
+```
+
+Dynamic variables are supported via command substitution in DSL declarations. Avoid nondeterministic values (`date`, random) in graph tasks if cache stability matters.
