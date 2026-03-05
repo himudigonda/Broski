@@ -85,9 +85,7 @@ fn looks_like_toml(content: &str) -> bool {
 fn warn_toml_deprecated() {
     static WARN_ONCE: Once = Once::new();
     WARN_ONCE.call_once(|| {
-        eprintln!(
-            "warning: TOML pleasefile is deprecated; migrate to DSL (version = \"0.3\") before v0.5"
-        );
+        eprintln!("warning: TOML pleasefile is deprecated; migrate to DSL before v0.6");
     });
 }
 
@@ -96,7 +94,7 @@ fn warn_dsl_03_deprecated_if_needed(parsed: &PleaseFile) {
         static WARN_ONCE: Once = Once::new();
         WARN_ONCE.call_once(|| {
             eprintln!(
-                "warning: pleasefile DSL version \"0.3\" is deprecated; migrate to version = \"0.4\" before v0.5"
+                "warning: pleasefile DSL version \"0.3\" is deprecated; migrate to version = \"0.5\" before v0.6"
             );
         });
     }

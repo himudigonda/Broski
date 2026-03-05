@@ -210,6 +210,10 @@ mod tests {
             isolation: None,
             mode: None,
             working_dir: None,
+            params: Vec::new(),
+            private: false,
+            confirm: None,
+            shell_override: None,
             requires: Vec::new(),
         }
     }
