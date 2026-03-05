@@ -201,13 +201,16 @@ impl Executor {
         options: &RunOptions,
         progress: Option<Sender<ProgressEvent>>,
     ) -> Result<TaskOutcome> {
-        emit_progress(&progress, ProgressEvent::TaskStarted(task_name.to_string()));
         let task = self
             .config
             .task
             .get(task_name)
             .ok_or_else(|| anyhow!("task '{}' not found", task_name))?;
         let task_mode = task.inferred_mode();
+        let show_progress = task_mode != TaskMode::Interactive;
+        if show_progress {
+            emit_progress(&progress, ProgressEvent::TaskStarted(task_name.to_string()));
+        }
         let (resolved_env, secret_env_keys) = self.resolve_task_env(task)?;
 
         if task_mode == TaskMode::Interactive {
@@ -219,10 +222,6 @@ impl Executor {
             }
 
             if options.dry_run {
-                emit_progress(
-                    &progress,
-                    ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::DryRun),
-                );
                 return Ok(TaskOutcome {
                     task_name: task_name.to_string(),
                     from_cache: false,
@@ -237,10 +236,6 @@ impl Executor {
 
             self.run_interactive_command(task_name, task, &resolved_env, options)
                 .with_context(|| format!("executing interactive task '{}'", task_name))?;
-            emit_progress(
-                &progress,
-                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Executed),
-            );
             return Ok(TaskOutcome {
                 task_name: task_name.to_string(),
                 from_cache: false,
@@ -271,13 +266,15 @@ impl Executor {
                 self.store.fetch_execution(task_name, &fingerprint_result.fingerprint.0)?
             {
                 if options.dry_run {
-                    emit_progress(
-                        &progress,
-                        ProgressEvent::TaskFinished(
-                            task_name.to_string(),
-                            TaskProgressStatus::DryRun,
-                        ),
-                    );
+                    if show_progress {
+                        emit_progress(
+                            &progress,
+                            ProgressEvent::TaskFinished(
+                                task_name.to_string(),
+                                TaskProgressStatus::DryRun,
+                            ),
+                        );
+                    }
                     return Ok(TaskOutcome {
                         task_name: task_name.to_string(),
                         from_cache: true,
@@ -290,13 +287,15 @@ impl Executor {
                     .restore_artifacts(&self.workspace_root, &record.artifacts)
                     .with_context(|| format!("restoring cache hit for task '{}'", task_name))?;
 
-                emit_progress(
-                    &progress,
-                    ProgressEvent::TaskFinished(
-                        task_name.to_string(),
-                        TaskProgressStatus::CacheHit,
-                    ),
-                );
+                if show_progress {
+                    emit_progress(
+                        &progress,
+                        ProgressEvent::TaskFinished(
+                            task_name.to_string(),
+                            TaskProgressStatus::CacheHit,
+                        ),
+                    );
+                }
                 return Ok(TaskOutcome {
                     task_name: task_name.to_string(),
                     from_cache: true,
@@ -312,10 +311,12 @@ impl Executor {
         }
 
         if options.dry_run {
-            emit_progress(
-                &progress,
-                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::DryRun),
-            );
+            if show_progress {
+                emit_progress(
+                    &progress,
+                    ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::DryRun),
+                );
+            }
             return Ok(TaskOutcome {
                 task_name: task_name.to_string(),
                 from_cache: false,
@@ -330,10 +331,12 @@ impl Executor {
             .with_context(|| format!("executing task '{}'", task_name))?;
 
         if !output.status.success() {
-            emit_progress(
-                &progress,
-                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Failed),
-            );
+            if show_progress {
+                emit_progress(
+                    &progress,
+                    ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Failed),
+                );
+            }
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             return Err(anyhow!(
@@ -362,10 +365,12 @@ impl Executor {
             self.store.save_execution(&record)?;
         }
 
-        emit_progress(
-            &progress,
-            ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Executed),
-        );
+        if show_progress {
+            emit_progress(
+                &progress,
+                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Executed),
+            );
+        }
         Ok(TaskOutcome {
             task_name: task_name.to_string(),
             from_cache: false,
