@@ -34,15 +34,15 @@ const config: Config = {
     [
       'classic',
       {
-        docs: {
-          routeBasePath: '/',
-          sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/himudigonda/Broski/tree/main/website/',
-          rehypePlugins: [[rehypeShiki, {themes: {light: 'github-light', dark: 'github-dark'}}]],
-          lastVersion: 'current',
-          versions: {
-            current: {
-              label: 'v0.5',
+          docs: {
+            routeBasePath: '/',
+            sidebarPath: './sidebars.ts',
+            editUrl: 'https://github.com/himudigonda/Broski/tree/main/website/',
+            rehypePlugins: [[rehypeShiki, {themes: {light: 'ayu-light', dark: 'ayu-dark'}}]],
+            lastVersion: 'current',
+            versions: {
+              current: {
+                label: 'v0.5',
             },
             'v0.4': {
               label: 'v0.4 (archived)',
@@ -52,7 +52,7 @@ const config: Config = {
         },
         blog: false,
         pages: {
-          rehypePlugins: [[rehypeShiki, {themes: {light: 'github-light', dark: 'github-dark'}}]],
+          rehypePlugins: [[rehypeShiki, {themes: {light: 'ayu-light', dark: 'ayu-dark'}}]],
         },
         theme: {
           customCss: './src/css/custom.css',
@@ -144,8 +144,8 @@ const config: Config = {
       copyright: `Copyright © ${new Date().getFullYear()} Himansh Mudigonda. Built with Docusaurus.`,
     },
     prism: {
-      theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
+      theme: prismThemes.gruvboxMaterialLight,
+      darkTheme: prismThemes.gruvboxMaterialDark,
       additionalLanguages: ['bash', 'diff', 'json', 'toml', 'rust', 'yaml', 'makefile'],
     },
   } satisfies Preset.ThemeConfig,
