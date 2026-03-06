@@ -1,4 +1,46 @@
 {
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/please_docs/",
+      "permanent": true
+    },
+    {
+      "source": "/please_docs/",
+      "destination": "/please_docs",
+      "permanent": true
+    },
+    {
+      "source": "/quickstart",
+      "destination": "/quickstart/install",
+      "permanent": true
+    },
+    {
+      "source": "/architecture",
+      "destination": "/architecture/why-please",
+      "permanent": true
+    },
+    {
+      "source": "/dsl",
+      "destination": "/dsl/overview",
+      "permanent": true
+    },
+    {
+      "source": "/cli",
+      "destination": "/cli/commands",
+      "permanent": true
+    },
+    {
+      "source": "/operations",
+      "destination": "/operations/migration",
+      "permanent": true
+    },
+    {
+      "source": "/releases",
+      "destination": "/releases/v0.5",
+      "permanent": true
+    }
+  ],
   "rewrites": [
     {
       "source": "/please_docs",

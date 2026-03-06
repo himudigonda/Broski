@@ -4,9 +4,11 @@ sidebar_position: 1
 
 # DSL Overview (`version = "0.5"`)
 
+Use this page for DSL shape. Use [DSL Reference Table](./reference-table) for factual field constraints.
+
 Core shape:
 
-```text
+```bash
 version = "0.5"
 alias b = build
 
@@ -22,4 +24,33 @@ build [target] [mode="release"]: deps...
     run command
 ```
 
-See subpages for exact semantics.
+## Execution inference rules
+
+- task with declared `@out` defaults to graph behavior
+- task without `@out` defaults to interactive behavior
+- explicit `@mode` can override inference
+
+## Minimal high-signal patterns
+
+### Graph task pattern
+
+```bash
+build:
+    @in src/**/* Cargo.toml
+    @out target/release
+    cargo build --release
+```
+
+### Interactive task pattern
+
+```bash
+dev:
+    @mode interactive
+    npm run dev
+```
+
+## Next
+
+- [Task Headers and Parameters](./tasks-and-params)
+- [Annotations](./annotations)
+- [Reference Table](./reference-table)

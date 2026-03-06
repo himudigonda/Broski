@@ -39,7 +39,7 @@ please --workspace . run ci --explain
 please --workspace . run test --watch
 ```
 
-## Eclipse Portal
+## Docs Portal
 
 - Public docs: [https://himudigonda.me/please_docs/](https://himudigonda.me/please_docs/)
 - Standalone docs origin: [https://please-docs.vercel.app/please_docs/](https://please-docs.vercel.app/please_docs/)
@@ -57,7 +57,7 @@ please --workspace . run test --watch
 
 - `crates/` — core engine, CLI, cache, store
 - `pleasefile` — dogfooding orchestration
-- `website/` — Eclipse portal (Docusaurus)
+- `website/` — docs portal (Docusaurus)
 - `docs/legacy/` — archived markdown docs
 - `examples/` — runnable end-to-end samples
 

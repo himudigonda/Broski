@@ -1,0 +1,77 @@
+---
+sidebar_position: 3
+---
+
+# Troubleshooting
+
+Use this page when commands fail or behavior is unclear.
+
+## `please` command not found
+
+Run:
+
+```bash
+please --version
+```
+
+If command is missing:
+
+1. Re-run install script from [Install](../quickstart/install).
+2. Add the install path to `PATH` (usually `~/.local/bin`).
+3. Open a new shell and retry.
+
+## Task runs every time
+
+Likely cause: task is interactive or contracts are incomplete.
+
+Check:
+
+```bash
+please run <task> --explain
+```
+
+Fix:
+
+- ensure task has correct `@in` and `@out` for graph mode
+- avoid changing dynamic inputs unintentionally
+- verify no unconditional random/time-based values are used in task inputs
+
+## Task fails with missing tool error
+
+If a task declares `@requires`, Please fails fast when a tool is missing.
+
+Fix:
+
+- install required tool
+- verify with `which <tool>`
+- rerun task
+
+## `strict` isolation fails
+
+Some environments cannot satisfy strict isolation requirements.
+
+Fix:
+
+- use `@isolation best_effort` for local developer workflows
+- reserve strict mode for validated CI hosts
+
+## Why `--explain` does not show secret values
+
+`@secret_env` values are intentionally redacted.
+
+Expected behavior:
+
+- reason text stays actionable
+- secret values never appear in explain output
+
+## 404 on docs root URL
+
+If `/please_docs/` works but root does not:
+
+1. Confirm latest deployment uses current `main`.
+2. Redeploy docs project.
+3. Verify routing config from [`website/vercel.json`](https://github.com/himudigonda/Please/blob/main/website/vercel.json).
+
+## Need a full migration path
+
+Use [Migration Playbook](./migration) for Make/Just conversion patterns.

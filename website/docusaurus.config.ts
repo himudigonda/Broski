@@ -38,7 +38,7 @@ const config: Config = {
           routeBasePath: '/',
           sidebarPath: './sidebars.ts',
           editUrl: 'https://github.com/himudigonda/Please/tree/main/website/',
-          rehypePlugins: [[rehypeShiki, {themes: {light: 'github-light', dark: 'github-dark'}}]],
+          rehypePlugins: [[rehypeShiki, {themes: {light: 'github-light', dark: 'material-theme-palenight'}}]],
           lastVersion: 'current',
           versions: {
             current: {
@@ -52,7 +52,7 @@ const config: Config = {
         },
         blog: false,
         pages: {
-          rehypePlugins: [[rehypeShiki, {themes: {light: 'github-light', dark: 'github-dark'}}]],
+          rehypePlugins: [[rehypeShiki, {themes: {light: 'github-light', dark: 'material-theme-palenight'}}]],
         },
         theme: {
           customCss: './src/css/custom.css',
@@ -77,11 +77,11 @@ const config: Config = {
   themeConfig: {
     image: 'img/og-eclipse.png',
     colorMode: {
-      defaultMode: 'dark',
+      defaultMode: 'light',
       respectPrefersColorScheme: true,
     },
     navbar: {
-      title: 'Please Eclipse Portal',
+      title: 'Please Docs',
       logo: {
         alt: 'Please Logo',
         src: 'img/logo.svg',
@@ -146,7 +146,7 @@ const config: Config = {
     prism: {
       theme: prismThemes.github,
       darkTheme: prismThemes.dracula,
-      additionalLanguages: ['bash', 'diff', 'json', 'toml', 'rust', 'yaml'],
+      additionalLanguages: ['bash', 'diff', 'json', 'toml', 'rust', 'yaml', 'makefile'],
     },
   } satisfies Preset.ThemeConfig,
 };

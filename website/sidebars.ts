@@ -6,12 +6,17 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Quickstart',
-      items: ['quickstart/install', 'quickstart/first-pleasefile', 'quickstart/make-just-please'],
+      items: [
+        'quickstart/thirty-second-quickstart',
+        'quickstart/install',
+        'quickstart/first-pleasefile',
+        'quickstart/make-just-please',
+      ],
     },
     {
       type: 'category',
       label: 'Architecture',
-      items: ['architecture/engine-overview', 'architecture/cache-explain'],
+      items: ['architecture/why-please', 'architecture/engine-overview', 'architecture/cache-explain'],
     },
     {
       type: 'category',
@@ -22,6 +27,7 @@ const sidebars: SidebarsConfig = {
         'dsl/annotations',
         'dsl/interpolation-and-builtins',
         'dsl/imports-and-decorators',
+        'dsl/reference-table',
       ],
     },
     {
@@ -32,6 +38,7 @@ const sidebars: SidebarsConfig = {
         'cli/watch-mode',
         'operations/security',
         'operations/migration',
+        'operations/troubleshooting',
         'operations/release-runbook',
       ],
     },

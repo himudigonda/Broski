@@ -1,0 +1,59 @@
+---
+sidebar_position: 1
+---
+
+# 30-Second Quickstart
+
+Goal: run one deterministic task and inspect cache behavior in less than a minute.
+
+## 1) Create a minimal `pleasefile`
+
+```bash title="pleasefile"
+version = "0.5"
+
+build:
+    @in src/**/*.rs Cargo.toml Cargo.lock
+    @out target/release
+    cargo build --release
+```
+
+## 2) Run the task
+
+```bash
+please build
+```
+
+Expected outcome:
+
+- command executes successfully
+- outputs are written to `target/release`
+- execution metadata is recorded in `.please`
+
+## 3) Run again with explain
+
+```bash
+please run build --explain
+```
+
+Expected outcome:
+
+- second run reuses cache when inputs are unchanged
+- explain output shows cache hit or exact miss reason
+
+## 4) Force a controlled miss
+
+```bash
+echo "// touch" >> src/main.rs
+please run build --explain
+```
+
+Expected outcome:
+
+- explain reports input change
+- task reruns once, then returns to hit state on the next run
+
+Next:
+
+- [Install](./install)
+- [Your first pleasefile](./first-pleasefile)
+- [Make vs Just vs Please](./make-just-please)

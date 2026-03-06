@@ -31,3 +31,21 @@ Graph tasks must declare inputs and outputs. The runner fingerprints relevant ex
 - explicit environment keys
 - input file content hashes
 - mode/isolation metadata
+
+## What is validated before execution
+
+- dependency graph must be resolvable
+- task names cannot collide with reserved CLI command names
+- required tools can be checked via `@requires`
+- graph-mode tasks rely on declared contracts (`@in`, `@out`) for deterministic reuse
+
+## Operational trade-offs
+
+- interactive mode gives terminal-first UX, but bypasses graph caching
+- graph mode gives deterministic reuse, but requires explicit contracts
+- strict isolation may require host capabilities not available in every local environment
+
+Use:
+
+- [Cache Explainability](./cache-explain) for rerun diagnostics
+- [Troubleshooting](../operations/troubleshooting) for common failure modes

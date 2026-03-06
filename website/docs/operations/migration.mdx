@@ -2,17 +2,197 @@
 sidebar_position: 2
 ---
 
-# Migration
+# Migration Playbook (Make/Just -> Please)
 
-## From Make / Just
+This guide is for teams migrating real projects without downtime.
 
-1. Port common commands as tasks.
-2. Add explicit `@in`/`@out` contracts for deterministic graph caching.
-3. Keep interactive workflows in `@mode interactive` tasks.
-4. Use `--explain` while tuning contracts.
+## What problems Please solves
 
-## Compatibility in v0.5
+1. Rebuild ambiguity: `--explain` gives concrete cache miss reasons.
+2. Timestamp fragility: graph fingerprints are content-based.
+3. Split tooling: one runner for graph and interactive flows.
+4. Hidden environment drift: explicit `@env`, `@secret_env`, `@load`.
+5. Manual dependency ordering: explicit task graph.
 
-- DSL `0.3` and `0.4` supported with deprecation warnings.
-- TOML supported with deprecation warning.
-- Planned removal for legacy formats: `v0.6`.
+## What Please does not solve
+
+1. Remote/distributed cache orchestration.
+2. Automatic semantic dependency inference.
+3. Full Windows parity for every strict isolation path.
+
+## Migration strategy
+
+1. Keep current Make/Just runner while bootstrapping Please.
+2. Port one CI-critical flow (`build`, `test`, `ci`) first.
+3. Add strict contracts (`@in`, `@out`) to graph tasks.
+4. Validate behavior using `--dry-run` and `--explain`.
+5. Port developer workflows (`dev`, `watch`, `serve`) as interactive tasks.
+6. Switch CI entrypoint to Please after parity.
+7. Remove old runner after two green cycles.
+
+## Concept mapping
+
+| Existing concept | Make | Just | Please |
+| --- | --- | --- | --- |
+| Task | target | recipe | task header |
+| Dependency edge | target deps | recipe deps | `task: dep_a dep_b` |
+| Parameters | variables | recipe args | `[arg]` and `[arg="default"]` |
+| Env injection | shell env | shell env | `@env`, `@secret_env`, `@load` |
+| Long-running dev task | recipe | recipe | `@mode interactive` |
+| Deterministic artifact cache | not first-class | not first-class | graph mode + manifest fingerprints |
+| Rebuild reason | limited/manual | limited | `--explain` |
+
+## Conversion patterns
+
+### Pattern A: Make CI chain
+
+```makefile title="Makefile"
+build:
+    cargo build --release
+
+test:
+    cargo test
+
+ci: build test
+```
+
+```bash title="pleasefile"
+version = "0.5"
+
+build:
+    @in src/**/* Cargo.toml Cargo.lock
+    @out target/release
+    cargo build --release
+
+test: build
+    @in src/**/* tests/**/* Cargo.toml Cargo.lock
+    @out .please/stamps/test.ok
+    cargo test
+    touch .please/stamps/test.ok
+
+ci: test
+    @mode interactive
+    echo "ci complete"
+```
+
+Verify:
+
+```bash
+please run ci --dry-run --explain
+please run ci --explain
+```
+
+### Pattern B: Just args -> Please params
+
+```makefile title="justfile"
+build target mode="release":
+  cargo build --bin {{target}} --{{mode}}
+```
+
+```bash title="pleasefile"
+build [target] [mode="release"]:
+    @in src/**/* Cargo.toml
+    @out dist/{{ target }}
+    cargo build --bin {{ target }} --{{ mode }}
+```
+
+Run:
+
+```bash
+please build api
+please build api debug
+```
+
+### Pattern C: setup + dev workflow
+
+```makefile title="justfile"
+setup:
+  pip install -r requirements.txt
+  npm install
+
+dev:
+  docker compose up
+```
+
+```bash title="pleasefile"
+setup:
+    @mode interactive
+    @requires python3 npm
+    pip install -r requirements.txt
+    npm install
+
+dev:
+    @mode interactive
+    @requires docker
+    docker compose up
+```
+
+## Anti-patterns and fixes
+
+### Anti-pattern: single mega-task
+
+Problem: one task installs deps, builds, tests, runs server.
+
+Fix: split into composable tasks with clear mode boundaries.
+
+### Anti-pattern: no output contracts
+
+Problem: graph tasks without outputs cannot be validated as deterministic outputs.
+
+Fix: declare concrete `@out` artifacts or stamps.
+
+### Anti-pattern: broad input globs
+
+Problem: `@in **/*` causes unnecessary cache misses.
+
+Fix: define minimal contract:
+
+```bash
+@in src/**/* Cargo.toml Cargo.lock
+```
+
+### Anti-pattern: passing engine flags into task commands
+
+Problem: command receives unexpected flags.
+
+Fix: use implicit/external separation correctly:
+
+```bash
+# engine flags
+please setup --explain --dry-run
+
+# task-level passthrough
+please setup -- --verbose
+```
+
+## CI migration checklist
+
+- [ ] `please run ci --dry-run` succeeds
+- [ ] `please run ci --explain` shows deterministic reasons
+- [ ] build/test tasks declare `@in` and `@out`
+- [ ] interactive tasks explicitly use `@mode interactive`
+- [ ] required binaries covered by `@requires`
+- [ ] old CI runner removed only after parity and green history
+
+## Local developer checklist
+
+- [ ] `please list` shows clean public task surface
+- [ ] destructive tasks protected with `@confirm`
+- [ ] private internals hidden with `@private`
+- [ ] onboarding path documented in `README` and quickstart
+
+## Rollback plan
+
+If migration fails in CI:
+
+1. keep old runner as fallback entrypoint;
+2. disable Please entrypoint for one cycle;
+3. run `please run ci --explain` on failing commit;
+4. fix contracts (`@in/@out/env`) and re-enable.
+
+## Related docs
+
+- [Commands and Flags](../cli/commands)
+- [Task Headers and Parameters](../dsl/tasks-and-params)
+- [Annotations](../dsl/annotations)
+- [Troubleshooting](./troubleshooting)

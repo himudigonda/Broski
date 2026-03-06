@@ -4,7 +4,9 @@ sidebar_position: 2
 
 # Your First `pleasefile`
 
-```text title="pleasefile"
+Goal: define one interactive task and one deterministic graph task.
+
+```bash title="pleasefile"
 version = "0.5"
 
 setup:
@@ -26,8 +28,30 @@ please build api debug
 please run build --explain
 ```
 
+Expected behavior:
+
+- `please setup` streams output directly
+- `please build api debug` produces declared output path
+- `--explain` reports why build ran or was reused
+
 ## What this gives you
 
 - deterministic cache keys from `@in`, params, env, command, and metadata
 - strict graph mode when outputs are declared
 - interactive mode for long-running local workflows
+
+## Field quick-reference for this example
+
+| Field | Type | Default | Why it is used here |
+| --- | --- | --- | --- |
+| `version` | string | none | Enables current DSL behavior (`0.5`). |
+| `@mode interactive` | enum | inferred | Forces direct terminal streaming for `setup`. |
+| `@in` | list | empty | Declares content contract for cache key input. |
+| `@out` | list | empty | Declares artifact contract for deterministic output. |
+| `@requires cargo` | list | empty | Fails fast when required tool is missing. |
+
+## Next
+
+- [DSL reference table](../dsl/reference-table)
+- [Migration Playbook](../operations/migration)
+- [Troubleshooting](../operations/troubleshooting)

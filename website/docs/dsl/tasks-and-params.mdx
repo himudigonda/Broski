@@ -4,19 +4,161 @@ sidebar_position: 2
 
 # Task Headers and Parameters
 
-Required and default params:
+This page covers task declaration syntax, dependency wiring, parameter binding, defaults, and execution semantics.
 
-```text
+## Task header grammar
+
+```bash title="pleasefile"
+task_name:
+task_name: dep_a dep_b
+build [target] [mode="release"]: lint test
+```
+
+Header parts:
+
+1. Task name.
+2. Optional parameter list.
+3. Optional dependency list after `:`.
+
+## Parameter types
+
+### Required parameter
+
+```bash title="pleasefile"
+build [target]:
+    cargo build --bin {{ target }}
+```
+
+- Caller must provide value.
+- Missing value fails before execution.
+
+### Defaulted parameter
+
+```bash title="pleasefile"
 build [target] [mode="release"]:
     cargo build --bin {{ target }} --{{ mode }}
 ```
 
-Invocation examples:
+- Default used when argument omitted.
+- Caller can override by position.
+
+## Invocation examples
 
 ```bash
 please build api
 please build api debug
 please run build api debug --explain
+please build api -- --features json
 ```
 
-Missing required params fail before execution.
+## Binding rules
+
+1. Positional arguments bind left-to-right.
+2. Required params must be satisfied.
+3. Defaults apply only when corresponding position is not provided.
+4. Resolved params are available as `{{ param_name }}`.
+5. Resolved params influence graph fingerprints.
+
+## Dependencies and graph behavior
+
+```bash title="pleasefile"
+lint:
+    @in src/**/*
+    @out .please/stamps/lint.ok
+    cargo clippy --all-targets --all-features -- -D warnings
+    touch .please/stamps/lint.ok
+
+build [target]: lint
+    @in src/**/* Cargo.toml Cargo.lock
+    @out dist/{{ target }}
+    cargo build --bin {{ target }}
+```
+
+- `build` depends on `lint`.
+- Changing `target` changes fingerprint and can trigger rebuild.
+
+## Shebang task bodies
+
+Tasks can start with shebang bodies.
+
+```bash title="pleasefile"
+validate-json [path]:
+    #!/usr/bin/env python3
+    import json, pathlib, sys
+    p = pathlib.Path("{{ path }}")
+    json.loads(p.read_text())
+    print("ok", p)
+```
+
+Use this when inline shell becomes hard to maintain.
+
+## Make and Just migration mapping
+
+### Make variables -> Please params
+
+```makefile title="Makefile"
+build:
+    cargo build --bin $(TARGET)
+```
+
+```bash title="pleasefile"
+build [target]:
+    @in src/**/* Cargo.toml
+    @out dist/{{ target }}
+    cargo build --bin {{ target }}
+```
+
+Run:
+
+```bash
+please build api
+```
+
+### Just recipe args -> Please params
+
+```makefile title="justfile"
+build target mode="release":
+  cargo build --bin {{target}} --{{mode}}
+```
+
+```bash title="pleasefile"
+build [target] [mode="release"]:
+    @in src/**/* Cargo.toml
+    @out dist/{{ target }}
+    cargo build --bin {{ target }} --{{ mode }}
+```
+
+## Common mistakes
+
+1. Treating task args as named flags. Current binding is positional.
+2. Forgetting to declare `@out` for deterministic cached build tasks.
+3. Using params in command but not in output path when output is param-dependent.
+4. Overloading a single task with too many parameters.
+
+## Recommended patterns
+
+### Pattern: split orchestration and leaf tasks
+
+```bash title="pleasefile"
+ci: lint test build
+
+build [target] [mode="release"]:
+    @in src/**/* Cargo.toml Cargo.lock
+    @out dist/{{ target }}
+    cargo build --bin {{ target }} --{{ mode }}
+```
+
+### Pattern: dev task as interactive
+
+```bash title="pleasefile"
+dev:
+    @mode interactive
+    @requires docker
+    docker compose up
+```
+
+## Related pages
+
+- [Annotations](./annotations)
+- [Interpolation and Built-ins](./interpolation-and-builtins)
+- [Migration Playbook](../operations/migration)

@@ -4,28 +4,185 @@ sidebar_position: 3
 
 # Annotations
 
-## Inputs / Outputs
+This page defines each annotation, its purpose, constraints, and common mistakes.
 
-```text
-@in src/**/* Cargo.toml
-@out dist/app
+## `@in` input contracts
+
+```bash title="pleasefile"
+@in src/**/* Cargo.toml Cargo.lock
 ```
 
-## Environment
+- Type: list of glob patterns.
+- Purpose: defines inputs that influence graph fingerprints.
+- Effect: changing matched files can trigger cache miss.
+- Scope: graph tasks.
 
-```text
+Use narrow patterns. Prefer `src/**/* Cargo.toml` over `**/*`.
+
+## `@out` output contracts
+
+```bash title="pleasefile"
+@out dist/app
+@out reports/test.xml
+```
+
+- Type: list of paths.
+- Purpose: declares expected materialized outputs.
+- Effect: implies graph mode when `@mode` is omitted.
+- Validation: graph mode requires at least one output.
+
+If a task should be cached, declare explicit outputs.
+
+## `@env` runtime environment
+
+```bash title="pleasefile"
 @env RUST_LOG=info
 @env HOME
-@secret_env API_TOKEN
 ```
 
-## Runtime context
+Forms:
 
-```text
+1. `KEY=value`: sets fixed value for task.
+2. `KEY`: inherit from runtime environment.
+
+`@env` participates in fingerprints for graph tasks.
+
+## `@secret_env` secret environment keys
+
+```bash title="pleasefile"
+@secret_env GITHUB_TOKEN
+@secret_env AWS_SECRET_ACCESS_KEY
+```
+
+- Purpose: mark env keys as sensitive.
+- Effect: values are redacted in terminal/log/explain paths.
+- Explain reason stays generic: `cache miss: secret env changed`.
+
+Do not put literal secrets in `pleasefile`.
+
+## `@dir` working directory override
+
+```bash title="pleasefile"
 @dir services/api
-@mode graph
-@isolation off
-@requires cargo docker
 ```
 
-Graph mode requires outputs; interactive mode does not.
+- Type: single workspace-relative path.
+- Purpose: run command from specific directory.
+- Constraint: exactly one value.
+
+Use this instead of prefixing every command with `cd ... &&`.
+
+## `@mode` execution mode
+
+```bash title="pleasefile"
+@mode graph
+@mode interactive
+```
+
+Modes:
+
+- `graph`: deterministic, staged, cache-aware.
+- `interactive`: live workspace execution, no cache, TTY inherited.
+
+Inference when omitted:
+
+- `@out` present => graph mode.
+- no `@out` => interactive mode.
+
+## `@isolation` sandbox policy
+
+```bash title="pleasefile"
+@isolation strict
+@isolation best_effort
+@isolation off
+```
+
+- `strict`: enforce strict isolation where available.
+- `best_effort`: attempt strict, degrade when unsupported.
+- `off`: no sandbox isolation.
+
+`--force-isolation` CLI flag overrides task setting for graph tasks.
+
+## `@requires` tool preflight checks
+
+```bash title="pleasefile"
+@requires cargo docker python3
+```
+
+- Purpose: fail fast when required binaries are missing.
+- Check timing: before execution work.
+- Error style: task-scoped, explicit missing binary.
+
+Use this on setup/dev/deploy tasks to reduce trial-and-error failures.
+
+## `@private` hidden task
+
+```bash title="pleasefile"
+@private
+```
+
+- Purpose: hide helper tasks from `please list`.
+- Use for internal wiring tasks not meant for direct invocation.
+
+## `@confirm` safety prompt
+
+```bash title="pleasefile"
+@confirm "Drop local database? Type y to continue"
+```
+
+- Purpose: prevent accidental destructive execution.
+- Behavior: prompts before running task.
+- Constraint: prompt text must be non-empty.
+
+In non-interactive contexts, this should fail safe.
+
+## `@load` env file directive
+
+`@load` is a top-level directive (not task-scoped).
+
+```bash title="pleasefile"
+@load .env
+```
+
+- Purpose: load key-value pairs into task environment resolution.
+- Path: workspace-relative.
+- Typical usage: local development defaults.
+
+## Full example
+
+```bash title="pleasefile"
+version = "0.5"
+@load .env
+
+build [target] [mode="release"]:
+    @in src/**/* Cargo.toml Cargo.lock
+    @out dist/{{ target }}
+    @env RUST_LOG=info
+    @secret_env GITHUB_TOKEN
+    @dir services/api
+    @mode graph
+    @isolation best_effort
+    @requires cargo
+    cargo build --bin {{ target }} --{{ mode }}
+
+clean-db:
+    @private
+    @confirm "Reset local database?"
+    @mode interactive
+    @requires rm
+    rm -rf backend/data/app.db
+```
+
+## Mistakes to avoid
+
+1. Using `@mode graph` without `@out`.
+2. Using broad `@in **/*` for every task.
+3. Expecting `@secret_env` values in explain output.
+4. Using `@dir` with multiple values.
+5. Forgetting `@requires` for tool-heavy tasks.
+
+## Related pages
+
+- [Task Headers and Parameters](./tasks-and-params)
+- [Interpolation and Built-ins](./interpolation-and-builtins)
+- [DSL Reference Table](./reference-table)

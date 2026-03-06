@@ -34,7 +34,7 @@ cargo test --workspace
 - Linux strict isolation is validated in dedicated tests/jobs.
 
 ## Release references
-- Eclipse Portal: <https://himudigonda.me/please_docs/>
+- Docs Portal: <https://himudigonda.me/please_docs/>
 - Docs source: `website/`
 - Legacy markdown archive: `docs/legacy/`
 

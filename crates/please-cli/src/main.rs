@@ -14,7 +14,7 @@ use please_store::ArtifactStore;
 #[derive(Debug, Parser)]
 #[command(name = "please")]
 #[command(about = "Deterministic task runner powered by pleasefile")]
-#[command(after_help = "Stuck? Visit the Eclipse Portal: https://himudigonda.me/please_docs/")]
+#[command(after_help = "Stuck? Visit the Docs Portal: https://himudigonda.me/please_docs/")]
 #[command(version)]
 struct Cli {
     #[arg(long, default_value = ".")]
@@ -85,7 +85,7 @@ fn main() {
         } else {
             eprintln!("error: {error:#}");
         }
-        eprintln!("help: Eclipse Portal -> https://himudigonda.me/please_docs/");
+        eprintln!("help: Docs Portal -> https://himudigonda.me/please_docs/");
         std::process::exit(1);
     }
 }
@@ -202,11 +202,19 @@ fn run() -> Result<()> {
             let config = load_and_validate(&workspace)?;
             let cache = LocalArtifactStore::new(cache_root(&workspace))?;
             let executor = Executor::new(&workspace, config, Arc::new(cache))?;
-            let options = RunOptions {
+            let mut options = RunOptions {
+                dry_run: invocation.dry_run,
+                explain: invocation.explain,
+                force: invocation.force,
+                no_cache: invocation.no_cache,
                 watch: invocation.watch,
+                force_isolation: invocation.force_isolation,
                 passthrough_args: invocation.args,
                 ..RunOptions::default()
             };
+            if let Some(j) = invocation.jobs {
+                options.jobs = j.max(1);
+            }
 
             let summary = executor.run_target(&invocation.task, &options)?;
             if !summary.cache_hits.is_empty() {
@@ -218,14 +226,32 @@ fn run() -> Result<()> {
             if !summary.dry_run.is_empty() {
                 println!("dry-run: {}", summary.dry_run.join(", "));
             }
+            if options.explain {
+                for (task_name, reasons) in &summary.cache_miss_reasons {
+                    println!("explain {}:", task_name);
+                    for reason in reasons.iter().take(10) {
+                        println!("- {}", reason);
+                    }
+                    if reasons.len() > 10 {
+                        println!("- +{} more changes", reasons.len() - 10);
+                    }
+                }
+            }
             Ok(())
         }
     }
 }
 
+#[derive(Debug)]
 struct ImplicitTaskInvocation {
     task: String,
+    dry_run: bool,
+    explain: bool,
+    force: bool,
+    no_cache: bool,
     watch: bool,
+    force_isolation: bool,
+    jobs: Option<usize>,
     args: Vec<String>,
 }
 
@@ -233,7 +259,13 @@ fn parse_implicit_task_args(raw: Vec<String>) -> Result<ImplicitTaskInvocation> 
     let mut iter = raw.into_iter();
     let task =
         iter.next().ok_or_else(|| anyhow!("implicit task execution expected a task name"))?;
+    let mut dry_run = false;
+    let mut explain = false;
+    let mut force = false;
+    let mut no_cache = false;
     let mut watch = false;
+    let mut force_isolation = false;
+    let mut jobs: Option<usize> = None;
     let mut args = Vec::new();
     let mut passthrough_mode = false;
     for token in iter {
@@ -241,13 +273,62 @@ fn parse_implicit_task_args(raw: Vec<String>) -> Result<ImplicitTaskInvocation> 
             passthrough_mode = true;
             continue;
         }
-        if !passthrough_mode && token == "--watch" {
-            watch = true;
-            continue;
+        if !passthrough_mode {
+            match token.as_str() {
+                "--dry-run" => {
+                    dry_run = true;
+                    continue;
+                }
+                "--explain" => {
+                    explain = true;
+                    continue;
+                }
+                "--force" => {
+                    force = true;
+                    continue;
+                }
+                "--no-cache" => {
+                    no_cache = true;
+                    continue;
+                }
+                "--watch" => {
+                    watch = true;
+                    continue;
+                }
+                "--force-isolation" => {
+                    force_isolation = true;
+                    continue;
+                }
+                _ => {}
+            }
+
+            if let Some(value) = token.strip_prefix("--jobs=") {
+                let parsed = value
+                    .parse::<usize>()
+                    .with_context(|| format!("invalid value for --jobs: {}", value))?;
+                jobs = Some(parsed.max(1));
+                continue;
+            }
+
+            if token == "--jobs" {
+                return Err(anyhow!(
+                    "implicit task invocation requires --jobs=<n>; use explicit `please run {task} --jobs <n>` for space-separated jobs"
+                ));
+            }
         }
         args.push(token);
     }
-    Ok(ImplicitTaskInvocation { task, watch, args })
+    Ok(ImplicitTaskInvocation {
+        task,
+        dry_run,
+        explain,
+        force,
+        no_cache,
+        watch,
+        force_isolation,
+        jobs,
+        args,
+    })
 }
 
 fn load_and_validate(workspace: &Path) -> Result<please_core::PleaseFile> {
@@ -519,6 +600,72 @@ mod tests {
                 assert_eq!(parsed.task, "test");
                 assert!(!parsed.watch);
                 assert_eq!(parsed.args, vec!["--grep", "slow"]);
+            }
+            _ => panic!("expected external subcommand task"),
+        }
+    }
+
+    #[test]
+    fn parses_implicit_task_explain_and_dry_run_flags() {
+        let cli =
+            Cli::try_parse_from(["please", "--workspace", ".", "setup", "--explain", "--dry-run"])
+                .expect("parse cli");
+        match cli.command {
+            Some(Command::Task(raw)) => {
+                let parsed = parse_implicit_task_args(raw).expect("normalized args");
+                assert_eq!(parsed.task, "setup");
+                assert!(parsed.explain);
+                assert!(parsed.dry_run);
+                assert!(parsed.args.is_empty());
+            }
+            _ => panic!("expected external subcommand task"),
+        }
+    }
+
+    #[test]
+    fn implicit_passthrough_separator_keeps_please_flags_as_task_args() {
+        let cli = Cli::try_parse_from([
+            "please",
+            "--workspace",
+            ".",
+            "setup",
+            "--",
+            "--explain",
+            "--dry-run",
+        ])
+        .expect("parse cli");
+        match cli.command {
+            Some(Command::Task(raw)) => {
+                let parsed = parse_implicit_task_args(raw).expect("normalized args");
+                assert!(!parsed.explain);
+                assert!(!parsed.dry_run);
+                assert_eq!(parsed.args, vec!["--explain", "--dry-run"]);
+            }
+            _ => panic!("expected external subcommand task"),
+        }
+    }
+
+    #[test]
+    fn parses_implicit_task_jobs_equals_form() {
+        let cli = Cli::try_parse_from(["please", "--workspace", ".", "test", "--jobs=4"])
+            .expect("parse cli");
+        match cli.command {
+            Some(Command::Task(raw)) => {
+                let parsed = parse_implicit_task_args(raw).expect("normalized args");
+                assert_eq!(parsed.jobs, Some(4));
+            }
+            _ => panic!("expected external subcommand task"),
+        }
+    }
+
+    #[test]
+    fn rejects_implicit_task_jobs_space_form() {
+        let cli = Cli::try_parse_from(["please", "--workspace", ".", "test", "--jobs", "4"])
+            .expect("parse cli");
+        match cli.command {
+            Some(Command::Task(raw)) => {
+                let error = parse_implicit_task_args(raw).expect_err("jobs should fail");
+                assert!(error.to_string().contains("--jobs=<n>"));
             }
             _ => panic!("expected external subcommand task"),
         }

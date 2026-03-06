@@ -1,42 +1,55 @@
 @import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap');
 
 :root {
-  --eclipse-bg: #08070b;
-  --eclipse-surface: #111016;
-  --eclipse-ink: #f2f2f2;
-  --eclipse-muted: #8f9ba8;
-  --eclipse-orange: #ffca80;
+  --eclipse-bg: #ffffff;
+  --eclipse-surface: #f8fafc;
+  --eclipse-ink: #0f172a;
+  --eclipse-muted: #475569;
+  --eclipse-blue: #2563eb;
 
   --ifm-font-family-base: 'Google Sans', sans-serif;
-  --ifm-color-primary: #ffca80;
-  --ifm-color-primary-dark: #ffbc64;
-  --ifm-color-primary-darker: #ffb14f;
-  --ifm-color-primary-darkest: #f1950f;
-  --ifm-color-primary-light: #ffd89c;
-  --ifm-color-primary-lighter: #ffe0b2;
-  --ifm-color-primary-lightest: #ffeed4;
-  --ifm-background-color: #f8f8f9;
-  --ifm-font-color-base: #17161d;
+  --ifm-color-primary: var(--eclipse-blue);
+  --ifm-color-primary-dark: #1d4ed8;
+  --ifm-color-primary-darker: #1e40af;
+  --ifm-color-primary-darkest: #1e3a8a;
+  --ifm-color-primary-light: #3b82f6;
+  --ifm-color-primary-lighter: #60a5fa;
+  --ifm-color-primary-lightest: #93c5fd;
+  --ifm-background-color: var(--eclipse-bg);
+  --ifm-background-surface-color: var(--eclipse-surface);
+  --ifm-navbar-background-color: #ffffff;
+  --ifm-footer-background-color: #f1f5f9;
+  --ifm-font-color-base: var(--eclipse-ink);
+  --ifm-font-color-secondary: var(--eclipse-muted);
   --ifm-code-font-size: 92%;
+  --docusaurus-highlighted-code-line-bg: rgba(37, 99, 235, 0.1);
 }
 
 [data-theme='dark'] {
-  --ifm-background-color: var(--eclipse-bg);
-  --ifm-background-surface-color: var(--eclipse-surface);
-  --ifm-font-color-base: var(--eclipse-ink);
-  --ifm-font-color-secondary: var(--eclipse-muted);
-  --ifm-navbar-background-color: rgba(8, 7, 11, 0.86);
-  --ifm-footer-background-color: #0d0c12;
-  --docusaurus-highlighted-code-line-bg: rgba(255, 202, 128, 0.12);
+  --ifm-color-primary: #60a5fa;
+  --ifm-color-primary-dark: #3b82f6;
+  --ifm-color-primary-darker: #2563eb;
+  --ifm-color-primary-darkest: #1d4ed8;
+  --ifm-color-primary-light: #93c5fd;
+  --ifm-color-primary-lighter: #bfdbfe;
+  --ifm-color-primary-lightest: #dbeafe;
+  --ifm-background-color: #0b1220;
+  --ifm-background-surface-color: #111827;
+  --ifm-navbar-background-color: rgba(11, 18, 32, 0.92);
+  --ifm-footer-background-color: #0f172a;
+  --ifm-font-color-base: #e5e7eb;
+  --ifm-font-color-secondary: #9ca3af;
+  --docusaurus-highlighted-code-line-bg: rgba(96, 165, 250, 0.16);
+  --ifm-code-background: #1f2937;
 }
 
 .navbar {
   backdrop-filter: blur(10px);
-  border-bottom: 1px solid rgba(255, 202, 128, 0.15);
+  border-bottom: 1px solid rgba(37, 99, 235, 0.18);
 }
 
 .footer {
-  border-top: 1px solid rgba(255, 202, 128, 0.2);
+  border-top: 1px solid rgba(37, 99, 235, 0.2);
 }
 
 .markdown h1,
@@ -47,12 +60,29 @@
 
 .theme-code-block,
 .prism-code {
-  border: 1px solid rgba(255, 202, 128, 0.2);
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+[data-theme='dark'] .theme-code-block,
+[data-theme='dark'] .prism-code {
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+
+.theme-code-block pre,
+.theme-code-block code {
+  font-size: 0.95rem;
+  line-height: 1.65;
+}
+
+[data-theme='dark'] .token.plain {
+  color: #e5e7eb !important;
 }
 
 .eclipse-callout {
   border-left: 3px solid var(--ifm-color-primary);
-  background: rgba(255, 202, 128, 0.08);
+  background: rgba(37, 99, 235, 0.08);
   padding: 0.9rem 1rem;
   border-radius: 8px;
 }

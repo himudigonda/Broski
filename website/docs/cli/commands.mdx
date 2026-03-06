@@ -2,15 +2,180 @@
 sidebar_position: 1
 ---
 
-# CLI Commands
+# CLI Commands and Flags
+
+This page is full command reference. It is intentionally dense.
+
+## Command forms
 
 ```bash
+please <task> [task-args...] [flags]
+please run <task> [task-args...] [flags]
 please list
-please <task>
-please run <task> --explain
-please graph <task> --format dot
-please doctor --no-repair
+please graph <task> --format tree|dot
+please doctor [--repair|--no-repair]
+please cache prune --max-size <MB>
+```
+
+## Resolution rules
+
+1. Subcommands win over task names.
+2. Use `please run <task>` when you want explicit task resolution.
+3. Reserved names are blocked as task names: `run`, `list`, `graph`, `doctor`, `cache`, `help`, `version`.
+
+## Run behavior flags
+
+These flags apply to `please <task>` and `please run <task>`.
+
+| Flag | Default | Effect | Notes |
+| --- | --- | --- | --- |
+| `--dry-run` | off | Compute graph and show what would run, without execution. | Useful for CI validation and migration checks. |
+| `--explain` | off | Print cache miss reasons per task. | Reasons are based on manifest deltas (`input`, `env`, `run`, `outputs`, etc.). |
+| `--force` | off | Bypass cache read and execute tasks. | Explain output shows `cache bypass: --force supplied`. |
+| `--no-cache` | off | Do not read from cache and do not write cache artifacts. | Explain output shows `cache bypass: --no-cache supplied`. |
+| `--watch` | off | Re-run target graph on input changes. | See [Watch Mode](./watch-mode). |
+| `--force-isolation` | off | Force strict isolation for graph tasks. | Not supported for interactive tasks. |
+| `--jobs <n>` | auto | Override worker concurrency. | Explicit run supports `--jobs <n>`. Implicit run supports `--jobs=<n>`. |
+
+### Important parsing detail
+
+For implicit invocation (`please setup`), Please consumes engine flags itself:
+
+```bash
+please setup --explain --dry-run
+```
+
+To pass a literal flag to the underlying task command, use `--`:
+
+```bash
+please setup -- --explain
+```
+
+## Subcommands
+
+### `please list`
+
+List tasks and aliases from the loaded `pleasefile`.
+
+- `@private` tasks are hidden from default listing.
+- Task descriptions are surfaced from preceding comments in DSL docs.
+
+### `please run <task>` and `please <task>`
+
+Execute a target and its dependency graph.
+
+- Graph tasks: staged, fingerprinted, cache-aware.
+- Interactive tasks: no cache, no staging, TTY inherited.
+
+Examples:
+
+```bash
+please run ci --explain
+please ci --jobs=8
+please run build api release --force-isolation
+please test -- --grep slow
+```
+
+### `please graph <task> --format tree|dot`
+
+Show dependency graph for a target.
+
+```bash
+please graph ci --format tree
+please graph ci --format dot > graph.dot
+```
+
+Use `dot` output for Graphviz rendering.
+
+### `please doctor`
+
+Check runtime state and lock health under `.please/runtime`.
+
+| Mode | Behavior |
+| --- | --- |
+| default (`doctor`) | Reports and repairs stale runtime state. |
+| `--no-repair` | Report-only mode, no mutation. |
+| `--repair` | Explicit repair mode. |
+
+When an active lock is live, doctor refuses destructive cleanup.
+
+### `please cache prune --max-size <MB>`
+
+Prune local cache store to size budget.
+
+- Unit is **megabytes**.
+- Example:
+
+```bash
 please cache prune --max-size 512
 ```
 
-Subcommands always take precedence over task names. Use `please run <task>` when explicit resolution is needed.
+Output reports objects pruned, bytes freed, and remaining size.
+
+## Explain output details
+
+When `--explain` is enabled, reasons are printed per task, for example:
+
+- `cache miss: no prior execution record`
+- `cache miss: input changed: src/lib.rs`
+- `cache miss: env changed: RUSTFLAGS`
+- `cache miss: task command changed`
+- `cache miss: output contract changed`
+- `cache miss: secret env changed`
+- `cache bypass: --force supplied`
+- `cache bypass: --no-cache supplied`
+- `cache bypass: interactive mode`
+
+`@secret_env` values are never printed; reason remains generic.
+
+## Operational patterns
+
+### Validate a migration without running
+
+```bash
+please run ci --dry-run --explain
+```
+
+### Rebuild once, then return to normal cache flow
+
+```bash
+please run build --force
+please run build --explain
+```
+
+### Run high-parallelism on large graph
+
+```bash
+please run ci --jobs 12
+```
+
+### Interactive task with task-level passthrough
+
+```bash
+please dev -- --host 0.0.0.0
+```
+
+## Failure behavior
+
+- Unknown task: hard failure with task name.
+- Invalid DSL: parse/validation diagnostics include source context.
+- Invalid `--jobs` value: parse failure with actionable message.
+- `--force-isolation` on interactive task: rejected.
+
+## Make/Just mapping
+
+| Intent | Make/Just pattern | Please command |
+| --- | --- | --- |
+| Show tasks | `make help` / `just --list` | `please list` |
+| Run pipeline | `make ci` / `just ci` | `please ci` |
+| Render dependency graph | manual / limited | `please graph ci --format tree` |
+| Force execution | phony/manual | `please run ci --force` |
+| Explain rebuilds | not first-class | `please run ci --explain` |
+| Cache trim | manual cleanup scripts | `please cache prune --max-size 512` |
+
+## Related pages
+
+- [Watch Mode](./watch-mode)
+- [Annotations](../dsl/annotations)
+- [Migration Playbook](../operations/migration)
+- [Troubleshooting](../operations/troubleshooting)

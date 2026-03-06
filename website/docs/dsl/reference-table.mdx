@@ -1,0 +1,70 @@
+---
+sidebar_position: 6
+---
+
+# DSL Reference Table
+
+This page is factual reference only: types, defaults, and constraints.
+
+## Global keys
+
+| Key | Type | Default | Constraints |
+| --- | --- | --- | --- |
+| `version` | string | none | Required. Use `"0.5"` for current DSL. |
+| `alias <name> = <target>` | declaration | none | Target must exist. Cycles are invalid. |
+| `@load <path>` | directive | none | Path is workspace-relative. File must exist. |
+| `@import <path>` | directive | none | Path is workspace-relative. Circular imports are rejected. |
+
+## Task header
+
+| Form | Type | Default | Constraints |
+| --- | --- | --- | --- |
+| `task_name:` | declaration | none | Unique task name. |
+| `task_name: dep_a dep_b` | declaration | none | Dependencies must exist. |
+| `[param]` | parameter | required | Value must be provided at runtime. |
+| `[param="value"]` | parameter | `"value"` | Default used when no runtime arg provided. |
+
+## Task annotations
+
+| Annotation | Type | Default | Constraints |
+| --- | --- | --- | --- |
+| `@in <patterns...>` | list of strings | empty | Glob patterns. Drives graph fingerprinting. |
+| `@out <paths...>` | list of strings | empty | Declares graph outputs. Enables graph mode by default. |
+| `@env KEY=value` | key-value | none | Injects explicit env value. |
+| `@env KEY` | key | inherit | Reads value from runtime env. |
+| `@secret_env KEY` | key | none | Value redacted in explain/log output. |
+| `@dir <path>` | string | workspace root | Workspace-relative. |
+| `@mode graph\|interactive` | enum | inferred | `@out` implies graph when mode omitted. |
+| `@isolation off\|best_effort\|strict` | enum | runner default | Strict support depends on host capabilities. |
+| `@requires <tools...>` | list of strings | empty | Tools must be resolvable in `PATH`. |
+| `@private` | flag | false | Hidden from default task listing. |
+| `@confirm "message"` | string | none | Requires user confirmation before execution. |
+
+## Built-in interpolation
+
+| Expression | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `{{ os() }}` | string | none | Host OS identifier. |
+| `{{ arch() }}` | string | none | Host architecture identifier. |
+| `{{ env("KEY", "fallback") }}` | string | fallback if missing | Reads runtime env with fallback. |
+| `{{ PARAM }}` | string | none | Resolves task parameter or variable. |
+
+## Mode behavior summary
+
+| Mode | Caching | Staging | TTY | Typical usage |
+| --- | --- | --- | --- | --- |
+| graph | enabled | yes | buffered/reporting | build, test, package |
+| interactive | bypassed | no | inherited | dev server, watch, REPL |
+
+## CLI examples for parameter binding
+
+```bash
+please build api debug
+please run build --explain
+```
+
+## Related references
+
+- [Task Headers and Parameters](./tasks-and-params)
+- [Annotations](./annotations)
+- [Interpolation and Built-ins](./interpolation-and-builtins)

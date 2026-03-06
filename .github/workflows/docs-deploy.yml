@@ -32,12 +32,25 @@ jobs:
         working-directory: website
         run: npm run build
 
+      - name: Check Vercel secret availability
+        id: vercel_secrets
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          if [ -n "$VERCEL_TOKEN" ] && [ -n "$VERCEL_ORG_ID" ] && [ -n "$VERCEL_PROJECT_ID" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Vercel CLI
-        if: ${{ secrets.VERCEL_TOKEN != '' && secrets.VERCEL_ORG_ID != '' && secrets.VERCEL_PROJECT_ID != '' }}
+        if: ${{ steps.vercel_secrets.outputs.ready == 'true' }}
         run: npm i -g vercel@latest
 
       - name: Pull Vercel project settings
-        if: ${{ secrets.VERCEL_TOKEN != '' && secrets.VERCEL_ORG_ID != '' && secrets.VERCEL_PROJECT_ID != '' }}
+        if: ${{ steps.vercel_secrets.outputs.ready == 'true' }}
         working-directory: website
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -46,7 +59,7 @@ jobs:
         run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
 
       - name: Deploy to Vercel production
-        if: ${{ secrets.VERCEL_TOKEN != '' && secrets.VERCEL_ORG_ID != '' && secrets.VERCEL_PROJECT_ID != '' }}
+        if: ${{ steps.vercel_secrets.outputs.ready == 'true' }}
         working-directory: website
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -55,5 +68,5 @@ jobs:
         run: vercel deploy --prod --yes --token="$VERCEL_TOKEN"
 
       - name: Skip deploy when secrets missing
-        if: ${{ secrets.VERCEL_TOKEN == '' || secrets.VERCEL_ORG_ID == '' || secrets.VERCEL_PROJECT_ID == '' }}
+        if: ${{ steps.vercel_secrets.outputs.ready != 'true' }}
         run: echo "Vercel secrets not configured; docs build validated but deploy skipped."

@@ -9,7 +9,9 @@ import ToolComparison from '@site/src/components/ToolComparison';
 ## Define a build task
 
 <ToolComparison
-  language="text"
+  pleaseLanguage="bash"
+  makeLanguage="makefile"
+  justLanguage="makefile"
   pleaseCode={`build [target] [mode="release"]:\n    @in src/**/* Cargo.toml\n    @out dist/{{ target }}\n    cargo build --bin {{ target }} --{{ mode }}`}
   makeCode={`build:\n\tcargo build --release`}
   justCode={`build target mode="release":\n  cargo build --bin {{target}} --{{mode}}`}

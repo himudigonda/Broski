@@ -3,7 +3,7 @@ sidebar_position: 1
 slug: /
 ---
 
-# Eclipse Portal (Archived v0.4)
+# Please Docs (Archived v0.4)
 
 `Please` is a deterministic task runner and build orchestrator designed to replace Make/Just workflows for local and CI execution.
 
