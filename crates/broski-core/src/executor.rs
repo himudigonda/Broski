@@ -16,11 +16,12 @@ use broski_cache::unix_timestamp_secs;
 use broski_store::{ArtifactStore, ExecutionRecord};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use rand::RngCore;
 use rayon::prelude::*;
 use tempfile::{NamedTempFile, TempDir};
 use walkdir::{DirEntry, WalkDir};
 
-use crate::fingerprint::compute_fingerprint;
+use crate::fingerprint::{compute_fingerprint, FingerprintOptions};
 use crate::graph::TaskGraph;
 use crate::model::{BroskiFile, IsolationMode, TaskMode, TaskSpec};
 use crate::resolver::{normalize_relative_path, resolve_inputs};
@@ -96,6 +97,7 @@ pub struct Executor {
     graph: TaskGraph,
     store: Arc<dyn ArtifactStore>,
     loaded_env: BTreeMap<String, String>,
+    fingerprint_key: [u8; 32],
     _lock_guard: RuntimeLockGuard,
 }
 
@@ -113,8 +115,17 @@ impl Executor {
         }
         let lock_guard = acquire_runtime_lock(&workspace_root)?;
         let graph = TaskGraph::build(&config.task)?;
+        let fingerprint_key = load_or_create_fingerprint_key(&workspace_root)?;
 
-        Ok(Self { workspace_root, config, graph, store, loaded_env, _lock_guard: lock_guard })
+        Ok(Self {
+            workspace_root,
+            config,
+            graph,
+            store,
+            loaded_env,
+            fingerprint_key,
+            _lock_guard: lock_guard,
+        })
     }
 
     pub fn graph(&self) -> &TaskGraph {
@@ -441,7 +452,10 @@ impl Executor {
             &inputs,
             &resolved_env,
             &secret_env_keys,
-            &passthrough_args,
+            FingerprintOptions {
+                passthrough_args: &passthrough_args,
+                secret_env_key: &self.fingerprint_key,
+            },
         )?;
         let mut cache_miss_reasons = Vec::new();
 
@@ -1327,6 +1341,54 @@ fn load_env_files(workspace_root: &Path, files: &[String]) -> Result<BTreeMap<St
     Ok(env_map)
 }
 
+fn load_or_create_fingerprint_key(workspace_root: &Path) -> Result<[u8; 32]> {
+    let config_dir = workspace_root.join(".broski/config");
+    fs::create_dir_all(&config_dir).with_context(|| {
+        format!("creating fingerprint key config directory '{}'", config_dir.display())
+    })?;
+    let key_path = config_dir.join("salt");
+    if key_path.exists() {
+        let bytes = fs::read(&key_path)
+            .with_context(|| format!("reading fingerprint key file '{}'", key_path.display()))?;
+        if bytes.len() != 32 {
+            return Err(anyhow!(
+                "fingerprint key '{}' must contain exactly 32 bytes; found {}",
+                key_path.display(),
+                bytes.len()
+            ));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        return Ok(key);
+    }
+
+    let mut key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key);
+
+    let mut temp = tempfile::Builder::new()
+        .prefix("fingerprint-salt-")
+        .tempfile_in(&config_dir)
+        .with_context(|| format!("creating temp fingerprint key in '{}'", config_dir.display()))?;
+    temp.as_file_mut()
+        .write_all(&key)
+        .with_context(|| format!("writing temp fingerprint key in '{}'", config_dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = temp
+            .as_file()
+            .metadata()
+            .context("reading fingerprint key temp metadata")?
+            .permissions();
+        perms.set_mode(0o600);
+        temp.as_file().set_permissions(perms).context("setting fingerprint key permissions")?;
+    }
+    temp.persist(&key_path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("persisting fingerprint key to '{}'", key_path.display()))?;
+    Ok(key)
+}
+
 fn normalize_outputs(task: &TaskSpec) -> Result<Vec<PathBuf>> {
     let mut outputs = Vec::with_capacity(task.outputs.len());
     for output in &task.outputs {
@@ -1859,6 +1921,18 @@ mod tests {
         assert!(stdout.contains("value=1"));
         assert!(!stdout.contains("supersecret"));
         assert!(stdout.contains("token=[REDACTED]"));
+    }
+
+    #[test]
+    fn fingerprint_key_is_created_and_reused() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path();
+        let first = load_or_create_fingerprint_key(workspace).expect("first key");
+        let second = load_or_create_fingerprint_key(workspace).expect("second key");
+        assert_eq!(first, second);
+        let bytes =
+            fs::read(workspace.join(".broski/config/salt")).expect("read fingerprint key file");
+        assert_eq!(bytes.len(), 32);
     }
 
     fn success_exit_status() -> std::process::ExitStatus {
