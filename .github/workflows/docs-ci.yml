@@ -2,17 +2,13 @@ name: docs-ci
 
 on:
   push:
+    branches: ['main']
     paths:
       - 'website/**'
       - 'docs/**'
       - 'README.md'
       - '.github/workflows/docs-ci.yml'
-  pull_request:
-    paths:
-      - 'website/**'
-      - 'docs/**'
-      - 'README.md'
-      - '.github/workflows/docs-ci.yml'
+  workflow_dispatch:
 
 jobs:
   docs:
