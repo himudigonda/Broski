@@ -20,6 +20,16 @@ This guide is for teams migrating real projects without downtime.
 2. Automatic semantic dependency inference.
 3. Full Windows parity for every strict isolation path.
 
+## Progressive Adoption
+
+Use this order to keep migration low-risk:
+
+1. Copy-paste your existing shell commands into a `broskifile`.
+2. Confirm behavior is unchanged (`broski run <task>`).
+3. Add `@in` and `@out` only to slow or expensive tasks.
+4. Use `--explain` to verify the miss/hit reasons are what you expect.
+5. Introduce advanced annotations (`@requires`, `@env`, `@isolation`) only where they solve a real issue.
+
 ## Migration strategy
 
 1. Keep current Make/Just runner while bootstrapping Broski.

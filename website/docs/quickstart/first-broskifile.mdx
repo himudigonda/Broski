@@ -4,54 +4,50 @@ sidebar_position: 2
 
 # Your First `broskifile`
 
-Goal: define one interactive task and one deterministic graph task.
+Goal: keep initial setup simple, then adopt caching where it matters.
+
+## Step 1: copy your current command
 
 ```bash title="broskifile"
 version = "0.5"
 
-setup:
-    @mode interactive
-    npm install
-
-build [target] [mode="release"]:
-    @in src/**/* Cargo.toml
-    @out dist/{{ target }}
-    @requires cargo
-    cargo build --bin {{ target }} --{{ mode }}
+test:
+    python3 -m unittest
 ```
-
-Run tasks:
 
 ```bash
-broski setup
-broski build api debug
-broski run build --explain
+broski run test
 ```
 
-Expected behavior:
+## Step 2: add contracts only for expensive tasks
 
-- `broski setup` streams output directly
-- `broski build api debug` produces declared output path
-- `--explain` reports why build ran or was reused
+```bash title="broskifile"
+version = "0.5"
 
-## What this gives you
+test:
+    @in src/**/*.py tests/**/*.py
+    @out .broski/stamps/test.ok
+    mkdir -p .broski/stamps
+    python3 -m unittest
+    printf 'ok\n' > .broski/stamps/test.ok
+```
 
-- deterministic cache keys from `@in`, params, env, command, and metadata
-- strict graph mode when outputs are declared
-- interactive mode for long-running local workflows
+```bash
+broski run test --explain
+```
 
-## Field quick-reference for this example
+## Step 3: grow only when needed
 
-| Field | Type | Default | Why it is used here |
-| --- | --- | --- | --- |
-| `version` | string | none | Enables current DSL behavior (`0.5`). |
-| `@mode interactive` | enum | inferred | Forces direct terminal streaming for `setup`. |
-| `@in` | list | empty | Declares content contract for cache key input. |
-| `@out` | list | empty | Declares artifact contract for deterministic output. |
-| `@requires cargo` | list | empty | Fails fast when required tool is missing. |
+When you need long-running local workflows, add `@mode interactive` to that task only. Keep build/test/package tasks in graph mode with `@in` and `@out`.
+
+## Why this onboarding path works
+
+- immediate value with no extra annotations
+- selective caching where time is actually spent
+- concrete rerun diagnostics with `--explain`
 
 ## Next
 
 - [DSL reference table](../dsl/reference-table)
-- [Migration Playbook](../operations/migration)
+- [Migration playbook](../operations/migration)
 - [Troubleshooting](../operations/troubleshooting)

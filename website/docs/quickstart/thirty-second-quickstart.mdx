@@ -4,9 +4,24 @@ sidebar_position: 1
 
 # 30-Second Quickstart
 
-Goal: run one deterministic task and inspect cache behavior in less than a minute.
+Goal: run one task, then make reruns explainable.
 
-## 1) Create a minimal `broskifile`
+## 1) Start with one plain task
+
+```bash title="broskifile"
+version = "0.5"
+
+build:
+    cargo build --release
+```
+
+```bash
+broski run build
+```
+
+This already works like a lightweight Make/Just task.
+
+## 2) Add `@in` and `@out` for caching + safe promotion
 
 ```bash title="broskifile"
 version = "0.5"
@@ -17,43 +32,19 @@ build:
     cargo build --release
 ```
 
-## 2) Run the task
+These two contracts enable content-hash fingerprints and transactional output handling for graph tasks.
 
-```bash
-broski build
-```
-
-Expected outcome:
-
-- command executes successfully
-- outputs are written to `target/release`
-- execution metadata is recorded in `.broski`
-
-## 3) Run again with explain
+## 3) Ask why it ran
 
 ```bash
 broski run build --explain
 ```
 
-Expected outcome:
-
-- second run reuses cache when inputs are unchanged
-- explain output shows cache hit or exact miss reason
-
-## 4) Force a controlled miss
-
-```bash
-echo "// touch" >> src/main.rs
-broski run build --explain
-```
-
-Expected outcome:
-
-- explain reports input change
-- task reruns once, then returns to hit state on the next run
+Typical outcomes:
+- cache hit when nothing changed
+- concrete miss reasons, such as `cache miss: input changed: src/main.rs`
 
 Next:
-
 - [Install](./install)
 - [Your first broskifile](./first-broskifile)
 - [Make vs Just vs Broski](./make-just-broski)

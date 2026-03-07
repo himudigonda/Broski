@@ -7,7 +7,62 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange)](https://www.rust-lang.org/)
 
-Deterministic task runner and build orchestrator for teams replacing Make/Just in local + CI workflows.
+A drop-in task runner with Justfile simplicity, out-of-the-box caching, and `--explain` for broken builds.
+
+Early release note: Broski is production-usable for local/small-team workflows, but still in active alpha/beta iteration.
+
+## 30-Second Example
+
+Start with plain commands:
+
+```bash title="broskifile"
+version = "0.5"
+
+test:
+    python3 -m unittest
+```
+
+Then add two lines for reusable graph execution:
+
+```bash title="broskifile"
+version = "0.5"
+
+test:
+    @in src/**/*.py tests/**/*.py
+    @out .broski/stamps/test.ok
+    mkdir -p .broski/stamps
+    python3 -m unittest
+    printf 'ok\n' > .broski/stamps/test.ok
+```
+
+Run and inspect:
+
+```bash
+broski run test
+broski run test --explain
+```
+
+Typical explain output:
+- `cache hit` when inputs are unchanged
+- `cache miss: input changed: tests/test_api.py` when content changed
+
+## Why Broski
+
+- `--explain` tells you exactly why a task reran.
+- Transactional output promotion avoids poisoned workspace state on failures.
+- Interactive and graph execution are both first-class (`@mode interactive` for long-running dev tasks, graph mode for cacheable artifact tasks).
+
+## Who This Is For Right Now
+
+- Solo developers and small teams with messy shell scripts.
+- Make/Just users who want cache explainability and safer output handling.
+- Repos where rerun debugging costs real time.
+
+## Not Trying To Be Everything Yet
+
+- No remote/shared cache in this release line.
+- Not positioned yet as a full enterprise orchestration platform.
+- DSL and docs are still being trimmed for lower ceremony.
 
 ## Install in 10 Seconds
 
@@ -22,44 +77,27 @@ Pinned install:
 curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.5.2 bash
 ```
 
-## Why Broski
+## Benchmark Snapshot (TaskPulse, March 7, 2026)
 
-| Capability | Make | Just | Broski |
-| --- | --- | --- | --- |
-| Content-based invalidation | No | No | Yes (BLAKE3) |
-| Cache miss explainability | No | No | Yes (`--explain`) |
-| ACID-safe output promotion | No | No | Yes |
-| Interactive + graph modes | Basic | Basic | First-class |
-| Dependency DAG orchestration | Partial | Limited | Full target graph |
+Measured on `/Users/himudigonda/Desktop/test` with fresh binaries (`v0.5.2` baseline vs `0.6.0` candidate):
 
-## Quickstart
+- `cold_ci`: `10.79s -> 2.84s` (`-73.69%`)
+- `content_change_backend`: `3.58s -> 0.50s` (`-85.92%`)
+- `content_change_frontend`: `5.49s -> 2.34s` (`-57.30%`)
 
-```bash
-broski --workspace . list
-broski --workspace . ci
-broski --workspace . run ci --explain
-broski --workspace . run test --watch
-```
+Transparency note: tiny cached invocations (`warm_ci`, `dry_run_ci`, `cache_explain_hit`) are slightly slower in absolute terms (~`0.02s` vs `~0.015s`) but remain sub-`0.03s`.
 
 ## Docs Portal
 
 - Public docs: [https://himudigonda.me/broski_docs/](https://himudigonda.me/broski_docs/)
 - Standalone docs origin: [https://broski-docs.vercel.app/broski_docs/](https://broski-docs.vercel.app/broski_docs/)
 
-## Highlights in v0.5
-
-- first-class task parameters (`task [arg] [arg="default"]:`)
-- modular imports (`@import`)
-- decorators (`@private`, `@confirm`)
-- built-in interpolation (`os()`, `arch()`, `env()`)
-- shebang task bodies
-
 ## Repo Layout
 
-- `crates/` — core engine, CLI, cache, store
-- `broskifile` — dogfooding orchestration
-- `website/` — docs portal (Docusaurus)
-- `examples/` — runnable end-to-end samples
+- `crates/` - core engine, CLI, cache, store
+- `broskifile` - dogfooding orchestration
+- `website/` - docs portal (Docusaurus)
+- `examples/` - runnable end-to-end samples
 
 ## Developer Workflow
 
@@ -92,5 +130,3 @@ Then check the portal troubleshooting and architecture sections.
 ## License
 
 MIT. See `LICENSE`.
-
-This codebase was built with help from Codex-5.3-Extra-High. Gemini 3.1 Pro helped with the docs.

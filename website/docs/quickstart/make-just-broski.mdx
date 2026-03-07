@@ -6,33 +6,30 @@ import ToolComparison from '@site/src/components/ToolComparison';
 
 # Make vs Just vs Broski
 
-This page answers one practical question: if your team already uses Make or Just, what changes when you move to Broski?
+This page answers one practical question: what do you gain if your commands already work in Make/Just?
 
-## What problems Broski solves
+## The practical wedge
 
-Traditional task runners are excellent at command orchestration, but they leave core reliability gaps for modern CI and monorepos:
+Broski is strongest when you need all three together:
 
-- timestamp-driven rebuild ambiguity (`make` can rebuild too much or too little)
-- low explainability for reruns (especially after env or argument changes)
-- no transactional output safety (partial outputs after failed runs)
-- no built-in deterministic content fingerprinting
+1. command-style task authoring
+2. cache reuse for expensive tasks
+3. explicit rerun reasons via `--explain`
 
-Broski keeps simple task authoring while adding deterministic cache keys, explainability, and ACID-safe output promotion.
+## Same intent, different visibility
 
-## Same intent, different guarantees
-
-### Define a build task
+### Build task
 
 <ToolComparison
   broskiLanguage="bash"
   makeLanguage="makefile"
   justLanguage="makefile"
-  broskiCode={`build [target] [mode="release"]:\n    @in src/**/* Cargo.toml\n    @out dist/{{ target }}\n    @requires cargo\n    cargo build --bin {{ target }} --{{ mode }}`}
+  broskiCode={`build:\n    @in src/**/* Cargo.toml Cargo.lock\n    @out target/release\n    cargo build --release`}
   makeCode={`build:\n\tcargo build --release`}
-  justCode={`build target mode=\"release\":\n  cargo build --bin {{target}} --{{mode}}`}
+  justCode={`build:\n  cargo build --release`}
 />
 
-### Add a local dev task
+### Dev task (interactive)
 
 <ToolComparison
   broskiLanguage="bash"
@@ -43,157 +40,28 @@ Broski keeps simple task authoring while adding deterministic cache keys, explai
   justCode={`dev:\n  npm run dev`}
 />
 
-### Trigger with arguments
+## Why teams switch incrementally
 
-<ToolComparison
-  broskiLanguage="bash"
-  makeLanguage="makefile"
-  justLanguage="makefile"
-  broskiCode={`broski build api debug\nbroski run build --explain`}
-  makeCode={`make build TARGET=api MODE=debug`}
-  justCode={`just build api debug`}
-/>
+- You can copy commands first, then add `@in`/`@out` later.
+- `--explain` removes guesswork on cache misses.
+- Output promotion avoids partial writes after failed graph tasks.
 
-## Why teams choose Broski for CI
-
-| Capability | Make | Just | Broski |
-| --- | --- | --- | --- |
-| Content hashing | No | No | Yes (BLAKE3) |
-| DAG graph execution | Partial/manual | Basic | First-class |
-| Interactive mode | Native | Native | Native |
-| Cache explainability | No | No | `--explain` |
-| ACID output promotion | No | No | Yes |
-| Cache bypass reasoning | No | No | Yes |
-| Secret-aware explain output | No | No | Yes |
-
-## Why this makes daily developer work easier
-
-1. Fewer mystery reruns: `--explain` shows why a task reran.
-2. Fewer broken local states: graph tasks promote declared outputs transactionally.
-3. Less tribal knowledge: contracts (`@in`, `@out`, `@env`, `@requires`) make intent explicit.
-4. Cleaner migration path: keep Make/Just while porting one pipeline at a time.
-
-## Migration flow (recommended)
+## Recommended migration flow
 
 ```mermaid
 flowchart LR
-  A["Identify core tasks (build/test/package)"] --> B["Port task commands to broskifile"]
-  B --> C["Add @in and @out contracts"]
-  C --> D["Run with --explain"]
-  D --> E["Tune contracts until reasons are expected"]
-  E --> F["Migrate interactive dev tasks"]
+  A["Copy existing commands"] --> B["Run with broski"]
+  B --> C["Add @in and @out to slow tasks"]
+  C --> D["Use --explain to tune contracts"]
+  D --> E["Move dev servers to @mode interactive"]
 ```
 
-## Makefile to broskifile conversion examples
+## Keep expectations realistic
 
-### Example A: simple build + test
-
-```makefile title="Makefile"
-build:
-    cargo build --release
-
-test:
-    cargo test
-```
-
-```bash title="broskifile"
-version = "0.5"
-
-build:
-    @in src/**/* Cargo.toml Cargo.lock
-    @out target/release
-    cargo build --release
-
-test: build
-    @in src/**/* Cargo.toml Cargo.lock tests/**/*
-    @out .broski/stamps/test.ok
-    cargo test
-    touch .broski/stamps/test.ok
-```
-
-### Example B: env-sensitive command
-
-```makefile title="Makefile"
-release:
-    RUSTFLAGS="-D warnings" cargo build --release
-```
-
-```bash title="broskifile"
-release:
-    @in src/**/* Cargo.toml Cargo.lock
-    @out target/release
-    @env RUSTFLAGS=-D warnings
-    cargo build --release
-```
-
-## Justfile to broskifile conversion examples
-
-### Example A: parameterized build
-
-```makefile title="justfile"
-build target mode="release":
-  cargo build --bin {{target}} --{{mode}}
-```
-
-```bash title="broskifile"
-build [target] [mode="release"]:
-    @in src/**/* Cargo.toml Cargo.lock
-    @out dist/{{ target }}
-    cargo build --bin {{ target }} --{{ mode }}
-```
-
-### Example B: interactive dev workflow
-
-```makefile title="justfile"
-dev:
-  docker compose up
-```
-
-```bash title="broskifile"
-dev:
-    @mode interactive
-    docker compose up
-```
-
-## Decision checklist: when to choose graph mode
-
-Use graph mode when:
-
-- task outputs are meaningful artifacts you want to reuse
-- rerun cost is non-trivial (build/test/package)
-- you need cache explainability for CI debugging
-
-Use interactive mode when:
-
-- process is long-running (dev server, watcher, REPL)
-- task should stream output directly to terminal
-- caching is intentionally bypassed
-
-## Command recipes teams use most
-
-```bash
-# Validate graph shape and rerun logic without execution
-broski run ci --dry-run --explain
-
-# Show dependency layers as text
-broski graph ci --format text
-
-# Render graph for visualization in PR review
-broski graph ci --format dot > graph.dot
-
-# Force a one-time rebuild, then inspect normal behavior
-broski run build --force
-broski run build --explain
-
-# Task-level pass-through args
-broski test -- --grep smoke
-```
+Broski is not trying to replace every platform concern yet (for example remote cache and enterprise policy controls). This release line focuses on local/small-team reliability and rerun clarity.
 
 ## Next reads
 
-- [Engine Overview](../architecture/engine-overview)
-- [Cache Explainability](../architecture/cache-explain)
 - [Migration Playbook](../operations/migration)
-- [Anti-Patterns](../operations/anti-patterns)
-- [Common Mistakes](../operations/common-mistakes)
-- [FAQ](../operations/faq)
+- [Cache Explainability](../architecture/cache-explain)
+- [Commands and Flags](../cli/commands)

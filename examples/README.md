@@ -1,23 +1,29 @@
 # Examples
 
-This folder contains runnable `broskifile` examples across languages and stacks.
+Runnable `broskifile` examples focused on practical onboarding.
 
-## Included examples
-- `minimal`: smallest possible task contract.
-- `polyglot`: generated-data step + Rust backend build/package.
-- `python-cli`: Python module tested with `unittest`.
-- `go-http`: Go HTTP service with `go test` and build.
-- `node-web`: Node HTTP service with `node:test` and build.
-- `showcase`: React + Rust + Docker demonstration.
+## Start Here
 
-## Run examples
+- `minimal`: smallest graph-mode task with `@in` + `@out`.
+- `basic`: simple multi-step file pipeline.
+- `python-cli`: normal test/build workflow with cache reuse.
+
+## Broader Stack Examples
+
+- `go-http`: Go service build + test.
+- `node-web`: Node service build + test.
+- `polyglot`: mixed-language pipeline.
+- `showcase`: heavier demo (not the first onboarding stop).
+
+## Run all smoke tasks
+
 From repository root:
 
 ```bash
 broski --workspace . run examples_smoke --explain
 ```
 
-Run one example directly:
+## Run one example directly
 
 ```bash
 cargo run -p broski-cli -- --workspace examples/python-cli run ci --explain
