@@ -21,10 +21,13 @@ slug: /
 4. [Understand what problems Broski solves](architecture/why-broski)
 5. [Understand the execution model](architecture/engine-overview)
 6. [Use the migration playbook](operations/migration)
+7. [Avoid anti-patterns](operations/anti-patterns)
+8. [Read common mistakes](operations/common-mistakes)
+9. [Browse FAQ](operations/faq)
 
 ## Current Versioning
 
-- **Current:** `v0.5`
+- **Current:** `v0.5.2`
 
 ## Deeper references
 
@@ -32,3 +35,7 @@ slug: /
 - [Command Reference](cli/commands)
 - [Security and redaction](operations/security)
 - [Release runbook](operations/release-runbook)
+
+## Acknowledgment
+
+This codebase was built with help from Codex-5.3-Extra-High. Gemini 3.1 Pro helped with the docs.

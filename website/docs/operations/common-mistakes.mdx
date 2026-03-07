@@ -1,0 +1,106 @@
+---
+sidebar_position: 3
+---
+
+# Common Mistakes
+
+This page covers mistakes teams hit during early adoption and the fastest recovery path.
+
+## Mistake: using `broski graph <task> --format tree`
+
+Issue:
+
+- current CLI format values are `text` and `dot`
+
+Fix:
+
+```bash
+broski graph ci --format text
+broski graph ci --format dot > graph.dot
+```
+
+## Mistake: `--jobs` space form on implicit invocation
+
+Issue:
+
+- `broski ci --jobs 8` is invalid in implicit mode
+
+Fix:
+
+```bash
+# implicit
+broski ci --jobs=8
+
+# explicit
+broski run ci --jobs 8
+```
+
+## Mistake: expecting cache reuse for interactive tasks
+
+Issue:
+
+- interactive mode intentionally bypasses cache and staging
+
+Fix:
+
+- keep terminal-native tasks interactive
+- move deterministic artifact creation to graph tasks
+
+## Mistake: leaking unstable data into fingerprint inputs
+
+Issue:
+
+- embedding timestamps/random values in task inputs forces constant cache misses
+
+Fix:
+
+- keep inputs deterministic
+- use explicit parameter/env contracts and check miss reason with `--explain`
+
+## Mistake: unclear Make/Just migration boundaries
+
+Issue:
+
+- teams port all recipes at once and lose confidence when one fails
+
+Fix:
+
+1. migrate one CI-critical pipeline first
+2. validate with `--dry-run` and `--explain`
+3. expand task surface after two green cycles
+
+## Mistake: hiding helper tasks incorrectly
+
+Issue:
+
+- helper tasks clutter `broski list`
+
+Fix:
+
+```bash
+seed_test_data:
+    @private
+    @mode interactive
+    ./scripts/seed-test-data.sh
+```
+
+## Mistake: no protection on destructive tasks
+
+Issue:
+
+- accidental local data loss from maintenance tasks
+
+Fix:
+
+```bash
+clean_all:
+    @confirm
+    @mode interactive
+    rm -rf dist .cache temp
+```
+
+## Next
+
+- [Anti-Patterns](./anti-patterns)
+- [Troubleshooting](./troubleshooting)
+- [FAQ](./faq)

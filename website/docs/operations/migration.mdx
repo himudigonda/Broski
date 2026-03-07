@@ -127,43 +127,13 @@ dev:
     docker compose up
 ```
 
-## Anti-patterns and fixes
+## Anti-pattern reference
 
-### Anti-pattern: single mega-task
+Detailed anti-pattern guidance now has dedicated pages:
 
-Problem: one task installs deps, builds, tests, runs server.
-
-Fix: split into composable tasks with clear mode boundaries.
-
-### Anti-pattern: no output contracts
-
-Problem: graph tasks without outputs cannot be validated as deterministic outputs.
-
-Fix: declare concrete `@out` artifacts or stamps.
-
-### Anti-pattern: broad input globs
-
-Problem: `@in **/*` causes unnecessary cache misses.
-
-Fix: define minimal contract:
-
-```bash
-@in src/**/* Cargo.toml Cargo.lock
-```
-
-### Anti-pattern: passing engine flags into task commands
-
-Problem: command receives unexpected flags.
-
-Fix: use implicit/external separation correctly:
-
-```bash
-# engine flags
-broski setup --explain --dry-run
-
-# task-level passthrough
-broski setup -- --verbose
-```
+- [Anti-Patterns](./anti-patterns)
+- [Common Mistakes](./common-mistakes)
+- [FAQ](./faq)
 
 ## CI migration checklist
 

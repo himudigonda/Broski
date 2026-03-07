@@ -66,6 +66,13 @@ Broski keeps simple task authoring while adding deterministic cache keys, explai
 | Cache bypass reasoning | No | No | Yes |
 | Secret-aware explain output | No | No | Yes |
 
+## Why this makes daily developer work easier
+
+1. Fewer mystery reruns: `--explain` shows why a task reran.
+2. Fewer broken local states: graph tasks promote declared outputs transactionally.
+3. Less tribal knowledge: contracts (`@in`, `@out`, `@env`, `@requires`) make intent explicit.
+4. Cleaner migration path: keep Make/Just while porting one pipeline at a time.
+
 ## Migration flow (recommended)
 
 ```mermaid
@@ -162,8 +169,31 @@ Use interactive mode when:
 - task should stream output directly to terminal
 - caching is intentionally bypassed
 
+## Command recipes teams use most
+
+```bash
+# Validate graph shape and rerun logic without execution
+broski run ci --dry-run --explain
+
+# Show dependency layers as text
+broski graph ci --format text
+
+# Render graph for visualization in PR review
+broski graph ci --format dot > graph.dot
+
+# Force a one-time rebuild, then inspect normal behavior
+broski run build --force
+broski run build --explain
+
+# Task-level pass-through args
+broski test -- --grep smoke
+```
+
 ## Next reads
 
 - [Engine Overview](../architecture/engine-overview)
 - [Cache Explainability](../architecture/cache-explain)
 - [Migration Playbook](../operations/migration)
+- [Anti-Patterns](../operations/anti-patterns)
+- [Common Mistakes](../operations/common-mistakes)
+- [FAQ](../operations/faq)
