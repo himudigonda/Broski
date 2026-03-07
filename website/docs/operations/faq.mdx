@@ -1,0 +1,60 @@
+---
+sidebar_position: 4
+---
+
+# FAQ
+
+## Is Broski a replacement for Make/Just or a wrapper around them?
+
+Broski is a standalone task runner/orchestrator. It can coexist during migration, but it does not require Make/Just.
+
+## When should I use implicit vs explicit run?
+
+- implicit (`broski ci`) is concise and supports `--jobs=<n>`
+- explicit (`broski run ci`) is best when you want clear separation of engine flags and task args, including `--jobs <n>`
+
+## How do I pass task-level flags safely?
+
+Use `--`:
+
+```bash
+broski test -- --grep slow --nocapture
+```
+
+## Does `--watch` work with interactive tasks?
+
+It can, but interactive tools may already watch files. Running both watchers can duplicate reruns or logs.
+
+## Why does `--explain` hide secret values?
+
+`@secret_env` is redacted by design. You still get actionable reasons (for example, `secret env changed`) without exposing values.
+
+## When should I use `--force` vs `--no-cache`?
+
+- `--force`: bypass cache read for this run, but continue normal cache behavior afterward
+- `--no-cache`: bypass both read and write for that execution
+
+## What does strict isolation require?
+
+Strict isolation is Linux-only and depends on `bwrap` availability. For environments without strict support, use `best_effort` mode for local workflows.
+
+## How do I keep cache behavior predictable in CI?
+
+1. declare tight `@in` and `@out` contracts
+2. pin meaningful `@env` values used by build logic
+3. inspect misses with `broski run ci --explain`
+
+## Can I generate dependency graphs for review?
+
+Yes:
+
+```bash
+broski graph ci --format text
+broski graph ci --format dot > graph.dot
+```
+
+Render `graph.dot` with Graphviz to inspect graph shape in PR reviews.
+
+## Where should we start in a large monorepo?
+
+Start with one high-value pipeline (build/test/package), land deterministic contracts, and expand gradually rather than porting all scripts at once.

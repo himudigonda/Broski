@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -204,7 +204,19 @@ impl ArtifactStore for LocalArtifactStore {
 
     fn restore_artifacts(&self, workspace: &Path, artifacts: &[CachedArtifact]) -> Result<()> {
         for artifact in artifacts {
-            let dest = workspace.join(&artifact.relative_path);
+            let rel_path =
+                normalize_artifact_relative_path(&artifact.relative_path).with_context(|| {
+                    format!("validating cached artifact relative path '{}'", artifact.relative_path)
+                })?;
+            let dest = workspace.join(&rel_path);
+            if !dest.starts_with(workspace) {
+                return Err(anyhow!(
+                    "cached artifact path '{}' escapes workspace root '{}'",
+                    rel_path.display(),
+                    workspace.display()
+                ));
+            }
+            validate_object_hash(&artifact.object_hash)?;
             let src = self.objects_dir.join(&artifact.object_hash);
             if !src.exists() {
                 return Err(anyhow!(
@@ -405,6 +417,47 @@ fn dir_size(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
+fn normalize_artifact_relative_path(raw: &str) -> Result<PathBuf> {
+    if raw.trim().is_empty() {
+        return Err(anyhow!("cached artifact path cannot be empty"));
+    }
+
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return Err(anyhow!("cached artifact path '{}' must be relative", raw));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                return Err(anyhow!("cached artifact path '{}' cannot contain '..' segments", raw));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(anyhow!("cached artifact path '{}' must be relative", raw));
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(anyhow!("cached artifact path '{}' cannot resolve to current directory", raw));
+    }
+
+    Ok(normalized)
+}
+
+fn validate_object_hash(hash: &str) -> Result<()> {
+    if hash.len() != 64 || !hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "cached artifact object hash '{}' is invalid; expected 64 hex characters",
+            hash
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_manifest_column(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare("PRAGMA table_info(executions)").context("preparing table info")?;
     let mut rows = stmt.query([]).context("querying table info")?;
@@ -557,5 +610,49 @@ mod tests {
             .expect("fetch migrated row")
             .expect("row exists");
         assert!(fetched.manifest.is_empty());
+    }
+
+    #[test]
+    fn restore_artifacts_rejects_path_escape() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let output_rel = PathBuf::from("dist/app.txt");
+        let output_abs = workspace.join(&output_rel);
+        fs::create_dir_all(output_abs.parent().expect("parent")).expect("create dist");
+        fs::write(&output_abs, "hello").expect("write output");
+
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("create store");
+        let mut artifacts = store
+            .store_artifacts(&workspace, std::slice::from_ref(&output_rel))
+            .expect("store artifacts");
+        artifacts[0].relative_path = "../escape.txt".to_string();
+
+        let error =
+            store.restore_artifacts(&workspace, &artifacts).expect_err("path escape should fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("validating cached artifact relative path"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn restore_artifacts_rejects_invalid_object_hash() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let artifacts = vec![CachedArtifact {
+            relative_path: "dist/app.txt".to_string(),
+            object_hash: "not-a-hash".to_string(),
+            kind: ArtifactKind::File,
+        }];
+
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("create store");
+        let error =
+            store.restore_artifacts(&workspace, &artifacts).expect_err("invalid hash should fail");
+        assert!(error.to_string().contains("expected 64 hex characters"));
     }
 }

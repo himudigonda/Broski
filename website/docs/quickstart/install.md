@@ -21,7 +21,7 @@ Expected output includes:
 ## Pinned Version
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.5.1 bash
+curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.5.2 bash
 ```
 
 Use pinned install for reproducible onboarding and CI bootstrap scripts.

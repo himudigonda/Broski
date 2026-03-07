@@ -152,10 +152,26 @@ impl TaskSpec {
 }
 
 fn shell_escape(input: &str) -> String {
-    if input.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+    #[cfg(target_os = "windows")]
     {
-        return input.to_string();
+        if input
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+        {
+            return input.to_string();
+        }
+        return format!("'{}'", input.replace('\'', "''"));
     }
 
-    format!("'{}'", input.replace('\'', "'\"'\"'"))
+    #[cfg(not(target_os = "windows"))]
+    {
+        if input
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+        {
+            return input.to_string();
+        }
+
+        format!("'{}'", input.replace('\'', "'\"'\"'"))
+    }
 }

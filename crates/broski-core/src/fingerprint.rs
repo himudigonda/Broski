@@ -17,6 +17,12 @@ pub struct FingerprintResult {
     pub manifest: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct FingerprintOptions<'a> {
+    pub passthrough_args: &'a [String],
+    pub secret_env_key: &'a [u8; 32],
+}
+
 pub fn compute_fingerprint(
     workspace_root: &Path,
     task_name: &str,
@@ -24,7 +30,7 @@ pub fn compute_fingerprint(
     resolved_inputs: &[PathBuf],
     resolved_env: &BTreeMap<String, String>,
     secret_env_keys: &BTreeSet<String>,
-    passthrough_args: &[String],
+    options: FingerprintOptions<'_>,
 ) -> Result<FingerprintResult> {
     let mut manifest = BTreeMap::new();
 
@@ -42,7 +48,7 @@ pub fn compute_fingerprint(
     );
     manifest.insert(
         "task:passthrough_args".to_string(),
-        digest_value(&passthrough_args.join("\u{1f}")),
+        digest_value(&options.passthrough_args.join("\u{1f}")),
     );
     for (key, value) in &task.resolved_variables {
         manifest.insert(format!("var:{key}"), digest_value(value));
@@ -54,7 +60,10 @@ pub fn compute_fingerprint(
 
     for (key, value) in resolved_env {
         if secret_env_keys.contains(key) {
-            manifest.insert(format!("secret_env:{key}"), digest_value(value));
+            manifest.insert(
+                format!("secret_env:{key}"),
+                digest_secret_value(value, options.secret_env_key),
+            );
         } else {
             manifest.insert(format!("env:{key}"), digest_value(value));
         }
@@ -93,6 +102,12 @@ pub fn compute_fingerprint(
 
 fn digest_value(value: &str) -> String {
     let mut hasher = blake3::Hasher::new();
+    hasher.update(value.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn digest_secret_value(value: &str, key: &[u8; 32]) -> String {
+    let mut hasher = blake3::Hasher::new_keyed(key);
     hasher.update(value.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
@@ -159,6 +174,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Write;
 
+    fn test_secret_key() -> [u8; 32] {
+        [7u8; 32]
+    }
+
     fn base_task() -> TaskSpec {
         TaskSpec {
             deps: vec![],
@@ -193,11 +212,26 @@ mod tests {
 
         let env = BTreeMap::new();
         let secret = BTreeSet::new();
-        let first = compute_fingerprint(temp.path(), "build", &task, &resolved, &env, &secret, &[])
-            .expect("first");
-        let second =
-            compute_fingerprint(temp.path(), "build", &task, &resolved, &env, &secret, &[])
-                .expect("second");
+        let first = compute_fingerprint(
+            temp.path(),
+            "build",
+            &task,
+            &resolved,
+            &env,
+            &secret,
+            FingerprintOptions { passthrough_args: &[], secret_env_key: &test_secret_key() },
+        )
+        .expect("first");
+        let second = compute_fingerprint(
+            temp.path(),
+            "build",
+            &task,
+            &resolved,
+            &env,
+            &secret,
+            FingerprintOptions { passthrough_args: &[], secret_env_key: &test_secret_key() },
+        )
+        .expect("second");
 
         assert_eq!(first, second);
     }
@@ -224,12 +258,26 @@ mod tests {
         let env_a = BTreeMap::from([("MODE".to_string(), "a".to_string())]);
         let env_b = BTreeMap::from([("MODE".to_string(), "b".to_string())]);
         let secret = BTreeSet::new();
-        let fp_a =
-            compute_fingerprint(temp.path(), "build", &task_a, &resolved, &env_a, &secret, &[])
-                .expect("fingerprint a");
-        let fp_b =
-            compute_fingerprint(temp.path(), "build", &task_b, &resolved, &env_b, &secret, &[])
-                .expect("fingerprint b");
+        let fp_a = compute_fingerprint(
+            temp.path(),
+            "build",
+            &task_a,
+            &resolved,
+            &env_a,
+            &secret,
+            FingerprintOptions { passthrough_args: &[], secret_env_key: &test_secret_key() },
+        )
+        .expect("fingerprint a");
+        let fp_b = compute_fingerprint(
+            temp.path(),
+            "build",
+            &task_b,
+            &resolved,
+            &env_b,
+            &secret,
+            FingerprintOptions { passthrough_args: &[], secret_env_key: &test_secret_key() },
+        )
+        .expect("fingerprint b");
 
         assert_ne!(fp_a.fingerprint, fp_b.fingerprint);
         assert_ne!(fp_a.manifest.get("env:MODE"), fp_b.manifest.get("env:MODE"));
@@ -261,8 +309,16 @@ mod tests {
 
         let env = BTreeMap::new();
         let secret = BTreeSet::new();
-        let fp = compute_fingerprint(temp.path(), "build", &task, &resolved, &env, &secret, &[])
-            .expect("fingerprint");
+        let fp = compute_fingerprint(
+            temp.path(),
+            "build",
+            &task,
+            &resolved,
+            &env,
+            &secret,
+            FingerprintOptions { passthrough_args: &[], secret_env_key: &test_secret_key() },
+        )
+        .expect("fingerprint");
         assert!(fp.manifest.contains_key("input:src/missing.txt"));
         assert!(!fp.fingerprint.0.is_empty());
     }
@@ -298,11 +354,65 @@ mod tests {
         let resolved = vec![PathBuf::from("src")];
         let env = BTreeMap::new();
         let secret = BTreeSet::new();
-        let first = compute_fingerprint(root, "build", &task, &resolved, &env, &secret, &[])
-            .expect("first");
-        let second = compute_fingerprint(root, "build", &task, &resolved, &env, &secret, &[])
-            .expect("second");
+        let first = compute_fingerprint(
+            root,
+            "build",
+            &task,
+            &resolved,
+            &env,
+            &secret,
+            FingerprintOptions { passthrough_args: &[], secret_env_key: &test_secret_key() },
+        )
+        .expect("first");
+        let second = compute_fingerprint(
+            root,
+            "build",
+            &task,
+            &resolved,
+            &env,
+            &secret,
+            FingerprintOptions { passthrough_args: &[], secret_env_key: &test_secret_key() },
+        )
+        .expect("second");
         assert_eq!(first.fingerprint, second.fingerprint);
         assert_eq!(first.manifest.get("input:src"), second.manifest.get("input:src"));
+    }
+
+    #[test]
+    fn secret_env_manifest_uses_keyed_digest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        fs::create_dir_all(&src).expect("create src");
+        fs::write(src.join("main.rs"), "fn main() {}\n").expect("write main.rs");
+
+        let task = base_task();
+        let resolved = vec![PathBuf::from("src/main.rs")];
+        let env = BTreeMap::from([("TOKEN".to_string(), "topsecret123".to_string())]);
+        let secret = BTreeSet::from(["TOKEN".to_string()]);
+
+        let key_a = [1u8; 32];
+        let key_b = [2u8; 32];
+        let fp_a = compute_fingerprint(
+            temp.path(),
+            "build",
+            &task,
+            &resolved,
+            &env,
+            &secret,
+            FingerprintOptions { passthrough_args: &[], secret_env_key: &key_a },
+        )
+        .expect("fingerprint a");
+        let fp_b = compute_fingerprint(
+            temp.path(),
+            "build",
+            &task,
+            &resolved,
+            &env,
+            &secret,
+            FingerprintOptions { passthrough_args: &[], secret_env_key: &key_b },
+        )
+        .expect("fingerprint b");
+
+        assert_ne!(fp_a.manifest.get("secret_env:TOKEN"), fp_b.manifest.get("secret_env:TOKEN"));
     }
 }

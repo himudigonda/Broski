@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.2] - 2026-03-06
+
+### Security
+- Removed Windows `cmd.exe` fallback for default shell execution. Windows tasks now execute through PowerShell script files (`pwsh` preferred, `powershell` fallback) to reduce command-injection risk.
+- Reworked interactive `@secret_env` redaction to stream process output (`spawn` + threaded readers) instead of buffering via `output()`, preventing interactive deadlocks and unbounded output buffering.
+- Hardened strict Linux `bwrap` setup by replacing `--ro-bind / /` with explicit base directory mounts and `$HOME` tmpfs masking.
+- Secret manifest entries now use keyed BLAKE3 with workspace-local salt from `.broski/config/salt` instead of unsalted fast hashes.
+
+### Hardening
+- Dynamic variable command capture now enforces a 1 MiB output cap with bounded draining to avoid memory blowups and pipe backpressure hangs.
+- Runtime lock checks now include Linux process-start identity (`/proc/<pid>/stat` start ticks) to reduce false active-lock blocks from PID reuse.
+- Cache restore now validates artifact relative paths and object hashes before writing into workspace paths.
+- Added/updated regression tests for shell selection, strict isolation argument shape, redaction pattern floor, keyed secret fingerprints, parser output limits, and cache path/hash validation.
+
+### Documentation
+- Added deep-dive security hardening report at `docs/reports/v0.5.2-security-hardening.md` (includes Make/Just/Broski comparison and residual risk notes).
+- Expanded docs portal coverage for migration-heavy teams:
+  - dedicated `Anti-Patterns`, `Common Mistakes`, and `FAQ` pages under operations.
+  - broader command/flag usage examples and corrected graph format docs (`text|dot`).
+- Added attribution note to README and docs surfaces.
+
 ## [0.5.1] - 2026-03-05
 
 ### Changed

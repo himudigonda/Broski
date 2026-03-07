@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -49,6 +49,14 @@ jobs:
       - name: Run quality gate (macOS fast path)
         if: matrix.os == 'macos-latest'
         run: ./target/debug/broski --workspace . run test
+
+      - name: Run quality gate (Windows compile+unit fast path)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-targets --no-run
+          cargo test -p broski-cli --bin broski
 
   showcase:
     runs-on: ubuntu-latest

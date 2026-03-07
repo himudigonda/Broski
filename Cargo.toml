@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 license = "MIT"
 authors = ["Himudigonda"]
@@ -28,6 +28,7 @@ notify = "8.2"
 petgraph = "0.6"
 rayon = "1.10"
 reflink-copy = "0.1"
+rand = "0.8"
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

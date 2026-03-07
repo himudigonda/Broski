@@ -1,0 +1,119 @@
+---
+sidebar_position: 2
+---
+
+# Anti-Patterns
+
+These patterns create unstable pipelines, cache confusion, or hard-to-debug CI behavior.
+
+## 1. One giant "do everything" task
+
+Bad:
+
+- one task installs deps, builds, tests, and starts dev services
+- failures are hard to isolate
+- cache boundaries become meaningless
+
+Better:
+
+- split tasks by artifact boundary (`build`, `test`, `package`)
+- keep long-running workflows in `@mode interactive`
+
+## 2. Broad input contracts (`@in **/*`)
+
+Bad:
+
+- tiny unrelated file edits trigger full graph reruns
+- explain output becomes noisy instead of actionable
+
+Better:
+
+- scope contracts to real dependencies:
+
+```bash
+build:
+    @in src/**/* Cargo.toml Cargo.lock
+    @out target/release
+    cargo build --release
+```
+
+## 3. Missing output contracts in graph tasks
+
+Bad:
+
+- graph tasks without `@out` lose deterministic artifact intent
+- cache restore behavior is harder to reason about
+
+Better:
+
+- declare explicit outputs or stamp files for completion boundaries
+
+## 4. Mixing engine flags with task flags
+
+Bad:
+
+```bash
+broski test --grep slow
+```
+
+This may be interpreted as task args, not engine flags.
+
+Better:
+
+```bash
+# engine flags
+broski test --explain --dry-run
+
+# task args
+broski test -- --grep slow
+```
+
+## 5. Declaring interactive tasks as graph tasks
+
+Bad:
+
+- dev servers and watchers run in graph mode
+- stage/cache semantics are the wrong fit for long-running processes
+
+Better:
+
+```bash
+dev:
+    @mode interactive
+    npm run dev
+```
+
+## 6. Treating `--force` as normal workflow
+
+Bad:
+
+- routine use of `--force` hides contract issues
+- teams lose confidence in explainability
+
+Better:
+
+- use `--force` only for one-off rebuilds
+- then run again with `--explain` and fix root causes
+
+## 7. Ignoring `@requires`
+
+Bad:
+
+- tasks fail deep into execution for missing tools
+
+Better:
+
+- declare required binaries so failures happen immediately with actionable errors
+
+```bash
+lint:
+    @mode interactive
+    @requires cargo
+    cargo clippy --workspace --all-targets
+```
+
+## Next
+
+- [Common Mistakes](./common-mistakes)
+- [FAQ](./faq)
+- [Migration Playbook](./migration)

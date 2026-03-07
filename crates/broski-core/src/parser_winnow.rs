@@ -955,6 +955,8 @@ fn run_dynamic_variable_command(
     workspace_root: Option<&Path>,
     line_no: usize,
 ) -> Result<String> {
+    const DYNAMIC_COMMAND_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
+
     let cwd = workspace_root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -971,50 +973,130 @@ fn run_dynamic_variable_command(
     let mut child = child_cmd.spawn().with_context(|| {
         format!("spawning dynamic variable command '{}' at line {}", command, line_no)
     })?;
-    let mut stdout_pipe = child.stdout.take().ok_or_else(|| {
+    let stdout_pipe = child.stdout.take().ok_or_else(|| {
         parse_error(line_no, 1, "failed to capture dynamic command stdout".to_string())
     })?;
-    let mut stderr_pipe = child.stderr.take().ok_or_else(|| {
+    let stderr_pipe = child.stderr.take().ok_or_else(|| {
         parse_error(line_no, 1, "failed to capture dynamic command stderr".to_string())
     })?;
+    let stdout_reader = thread::spawn(move || {
+        read_limited_dynamic_output_stream(stdout_pipe, DYNAMIC_COMMAND_OUTPUT_LIMIT_BYTES)
+    });
+    let stderr_reader = thread::spawn(move || {
+        read_limited_dynamic_output_stream(stderr_pipe, DYNAMIC_COMMAND_OUTPUT_LIMIT_BYTES)
+    });
 
     let timeout = Duration::from_secs(5);
     let start = Instant::now();
+    let mut timed_out = false;
+    let mut final_status: Option<std::process::ExitStatus> = None;
     loop {
-        if let Some(status) = child.try_wait().context("waiting for dynamic variable command")? {
-            let status: std::process::ExitStatus = status;
-            let mut stdout_bytes = Vec::new();
-            let mut stderr_bytes = Vec::new();
-            let _ = stdout_pipe.read_to_end(&mut stdout_bytes);
-            let _ = stderr_pipe.read_to_end(&mut stderr_bytes);
-            if !status.success() {
-                let stderr = String::from_utf8_lossy(&stderr_bytes);
-                return Err(parse_error(
-                    line_no,
-                    1,
-                    format!(
-                        "dynamic variable command failed with status {}: {}",
-                        status
-                            .code()
-                            .map_or_else(|| "unknown".to_string(), |code| code.to_string()),
-                        stderr.trim()
-                    ),
-                ));
-            }
-            let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-            return Ok(stdout.trim_end_matches(['\r', '\n']).to_string());
+        if let Some(exit_status) =
+            child.try_wait().context("waiting for dynamic variable command")?
+        {
+            final_status = Some(exit_status);
+            break;
         }
         if start.elapsed() >= timeout {
+            timed_out = true;
             let _ = child.kill();
             let _ = child.wait();
-            return Err(parse_error(
-                line_no,
-                1,
-                format!("dynamic variable command timed out after {}s", timeout.as_secs()),
-            ));
+            break;
         }
         thread::sleep(Duration::from_millis(20));
     }
+
+    let stdout_result = stdout_reader
+        .join()
+        .map_err(|_| anyhow!("stdout reader thread panicked for dynamic variable command"))?
+        .context("reading dynamic variable command stdout")?;
+    let stderr_result = stderr_reader
+        .join()
+        .map_err(|_| anyhow!("stderr reader thread panicked for dynamic variable command"))?
+        .context("reading dynamic variable command stderr")?;
+
+    if timed_out {
+        return Err(parse_error(
+            line_no,
+            1,
+            format!("dynamic variable command timed out after {}s", timeout.as_secs()),
+        ));
+    }
+    let status = final_status.ok_or_else(|| {
+        parse_error(line_no, 1, "dynamic variable command exited without a status".to_string())
+    })?;
+
+    if stdout_result.exceeded_limit {
+        return Err(parse_error(
+            line_no,
+            1,
+            format!(
+                "dynamic variable command stdout exceeded {} byte limit",
+                DYNAMIC_COMMAND_OUTPUT_LIMIT_BYTES
+            ),
+        ));
+    }
+    if stderr_result.exceeded_limit {
+        return Err(parse_error(
+            line_no,
+            1,
+            format!(
+                "dynamic variable command stderr exceeded {} byte limit",
+                DYNAMIC_COMMAND_OUTPUT_LIMIT_BYTES
+            ),
+        ));
+    }
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_result.bytes);
+        return Err(parse_error(
+            line_no,
+            1,
+            format!(
+                "dynamic variable command failed with status {}: {}",
+                status.code().map_or_else(|| "unknown".to_string(), |code| code.to_string()),
+                stderr.trim()
+            ),
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&stdout_result.bytes).to_string();
+    Ok(stdout.trim_end_matches(['\r', '\n']).to_string())
+}
+
+struct LimitedDynamicOutput {
+    bytes: Vec<u8>,
+    exceeded_limit: bool,
+}
+
+fn read_limited_dynamic_output_stream<R: Read>(
+    mut reader: R,
+    limit_bytes: usize,
+) -> std::io::Result<LimitedDynamicOutput> {
+    let mut output = Vec::new();
+    let mut exceeded_limit = false;
+    let mut buffer = [0u8; 8 * 1024];
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if !exceeded_limit {
+            let remaining = limit_bytes.saturating_add(1).saturating_sub(output.len());
+            if read <= remaining {
+                output.extend_from_slice(&buffer[..read]);
+            } else {
+                output.extend_from_slice(&buffer[..remaining]);
+                exceeded_limit = true;
+            }
+            if output.len() > limit_bytes {
+                exceeded_limit = true;
+            }
+        }
+    }
+
+    Ok(LimitedDynamicOutput { bytes: output, exceeded_limit })
 }
 
 fn parse_error(line: usize, column: usize, message: String) -> anyhow::Error {
@@ -1214,6 +1296,25 @@ mod tests {
         let error = parse_broskifile_dsl(input).expect_err("timeout should fail");
         let chain = format!("{error:#}");
         assert!(chain.contains("timed out"));
+    }
+
+    #[test]
+    fn fails_when_dynamic_variable_command_exceeds_output_limit() {
+        let input = r#"
+            version = "0.4"
+            BIG = $(yes a | head -c 1048577)
+
+            build:
+                @out dist/out.txt
+                echo {{ BIG }} > dist/out.txt
+        "#;
+
+        let error = parse_broskifile_dsl(input).expect_err("size limit should fail");
+        let chain = format!("{error:#}");
+        assert!(
+            chain.contains("dynamic variable command stdout exceeded 1048576 byte limit"),
+            "unexpected error chain: {chain}"
+        );
     }
 
     #[test]

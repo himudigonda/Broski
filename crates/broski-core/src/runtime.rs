@@ -10,6 +10,8 @@ struct ActiveLock {
     pid: i32,
     started_at: i64,
     host: String,
+    #[serde(default)]
+    process_start_ticks: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,7 +45,7 @@ pub fn sweep_runtime_state(workspace_root: &Path, repair: bool) -> Result<SweepR
 
     if lock_path.exists() {
         let lock = read_active_lock(&lock_path)?;
-        if is_pid_alive(lock.pid) {
+        if is_lock_process_active(&lock) {
             report.active_lock_detected = true;
             return Ok(report);
         }
@@ -72,7 +74,7 @@ pub fn acquire_runtime_lock(workspace_root: &Path) -> Result<RuntimeLockGuard> {
 
     if lock_path.exists() {
         let lock = read_active_lock(&lock_path)?;
-        if is_pid_alive(lock.pid) {
+        if is_lock_process_active(&lock) {
             return Err(anyhow!("another Broski execution is active (pid={})", lock.pid));
         }
         fs::remove_file(&lock_path)
@@ -83,6 +85,7 @@ pub fn acquire_runtime_lock(workspace_root: &Path) -> Result<RuntimeLockGuard> {
         pid: std::process::id() as i32,
         started_at: unix_timestamp_secs(),
         host: hostname(),
+        process_start_ticks: process_start_ticks(std::process::id() as i32),
     };
 
     let serialized = serde_json::to_string_pretty(&payload).context("serializing active lock")?;
@@ -128,6 +131,18 @@ fn purge_children(root: &Path) -> Result<usize> {
     Ok(removed)
 }
 
+fn is_lock_process_active(lock: &ActiveLock) -> bool {
+    if !is_pid_alive(lock.pid) {
+        return false;
+    }
+    if let Some(expected_start) = lock.process_start_ticks {
+        if let Some(actual_start) = process_start_ticks(lock.pid) {
+            return actual_start == expected_start;
+        }
+    }
+    true
+}
+
 fn unix_timestamp_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -147,6 +162,30 @@ fn hostname() -> String {
         }
     }
     "unknown-host".to_string()
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_ticks(pid: i32) -> Option<u64> {
+    if pid <= 0 {
+        return None;
+    }
+    let path = format!("/proc/{pid}/stat");
+    let content = fs::read_to_string(path).ok()?;
+    parse_linux_proc_stat_start_ticks(&content)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_proc_stat_start_ticks(stat: &str) -> Option<u64> {
+    // procfs format is: pid (comm) state ppid ... starttime ...
+    let close_paren = stat.rfind(')')?;
+    let remainder = stat.get(close_paren + 2..)?;
+    let fields: Vec<&str> = remainder.split_whitespace().collect();
+    fields.get(19)?.parse::<u64>().ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_start_ticks(_pid: i32) -> Option<u64> {
+    None
 }
 
 #[cfg(unix)]
@@ -185,7 +224,12 @@ mod tests {
         fs::create_dir_all(stage.join("orphan")).expect("create stage orphan");
         fs::create_dir_all(tx.join("orphan")).expect("create tx orphan");
 
-        let stale = ActiveLock { pid: 999_999, started_at: 1, host: "test".to_string() };
+        let stale = ActiveLock {
+            pid: 999_999,
+            started_at: 1,
+            host: "test".to_string(),
+            process_start_ticks: None,
+        };
         fs::write(
             runtime.join("active.lock"),
             serde_json::to_string(&stale).expect("serialize lock"),
@@ -211,5 +255,32 @@ mod tests {
         }
 
         assert!(!lock_path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sweep_marks_lock_stale_when_process_start_does_not_match() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        let runtime = workspace.join(".broski/runtime");
+        fs::create_dir_all(&runtime).expect("create runtime");
+
+        let pid = std::process::id() as i32;
+        let start = process_start_ticks(pid).expect("process start");
+        let stale = ActiveLock {
+            pid,
+            started_at: 1,
+            host: "test".to_string(),
+            process_start_ticks: Some(start.saturating_add(1)),
+        };
+        fs::write(
+            runtime.join("active.lock"),
+            serde_json::to_string(&stale).expect("serialize lock"),
+        )
+        .expect("write lock");
+
+        let report = sweep_runtime_state(workspace, false).expect("sweep state");
+        assert!(report.stale_lock_detected);
+        assert!(!report.active_lock_detected);
     }
 }

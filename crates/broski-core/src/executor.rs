@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
-use std::io;
-use std::io::IsTerminal;
-use std::io::Write;
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::{self, Sender};
@@ -17,11 +16,12 @@ use broski_cache::unix_timestamp_secs;
 use broski_store::{ArtifactStore, ExecutionRecord};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use rand::RngCore;
 use rayon::prelude::*;
 use tempfile::{NamedTempFile, TempDir};
 use walkdir::{DirEntry, WalkDir};
 
-use crate::fingerprint::compute_fingerprint;
+use crate::fingerprint::{compute_fingerprint, FingerprintOptions};
 use crate::graph::TaskGraph;
 use crate::model::{BroskiFile, IsolationMode, TaskMode, TaskSpec};
 use crate::resolver::{normalize_relative_path, resolve_inputs};
@@ -97,6 +97,7 @@ pub struct Executor {
     graph: TaskGraph,
     store: Arc<dyn ArtifactStore>,
     loaded_env: BTreeMap<String, String>,
+    fingerprint_key: [u8; 32],
     _lock_guard: RuntimeLockGuard,
 }
 
@@ -114,8 +115,17 @@ impl Executor {
         }
         let lock_guard = acquire_runtime_lock(&workspace_root)?;
         let graph = TaskGraph::build(&config.task)?;
+        let fingerprint_key = load_or_create_fingerprint_key(&workspace_root)?;
 
-        Ok(Self { workspace_root, config, graph, store, loaded_env, _lock_guard: lock_guard })
+        Ok(Self {
+            workspace_root,
+            config,
+            graph,
+            store,
+            loaded_env,
+            fingerprint_key,
+            _lock_guard: lock_guard,
+        })
     }
 
     pub fn graph(&self) -> &TaskGraph {
@@ -442,7 +452,10 @@ impl Executor {
             &inputs,
             &resolved_env,
             &secret_env_keys,
-            &passthrough_args,
+            FingerprintOptions {
+                passthrough_args: &passthrough_args,
+                secret_env_key: &self.fingerprint_key,
+            },
         )?;
         let mut cache_miss_reasons = Vec::new();
 
@@ -629,25 +642,12 @@ impl Executor {
                     "strict isolation requires bubblewrap (`bwrap`) to be installed on Linux",
                 )?;
                 let mut cmd = Command::new(bwrap);
-                cmd.arg("--die-with-parent")
-                    .arg("--new-session")
-                    .arg("--unshare-net")
-                    .arg("--ro-bind")
-                    .arg("/")
-                    .arg("/")
-                    .arg("--bind")
-                    .arg(stage_workspace)
-                    .arg(stage_workspace)
-                    .arg("--proc")
-                    .arg("/proc")
-                    .arg("--dev")
-                    .arg("/dev")
-                    .arg("--tmpfs")
-                    .arg("/tmp")
-                    .arg("--chdir")
-                    .arg(stage_workspace);
-                cmd.arg(&invocation.program);
-                cmd.args(&invocation.args);
+                let home_dir = env::var_os("HOME").map(PathBuf::from);
+                cmd.args(build_strict_bwrap_args(
+                    stage_workspace,
+                    &invocation,
+                    home_dir.as_deref(),
+                ));
                 cmd
             }
             IsolationMode::Strict => {
@@ -711,18 +711,30 @@ impl Executor {
             command.env(key, value);
         }
 
-        let status = if let Some(redactor) = redactor {
-            let output = command.output().with_context(|| {
+        let status = if let Some(redactor) = redactor.cloned() {
+            let mut child = command.spawn().with_context(|| {
                 format!("spawning interactive task command '{}'", invocation.display_command)
             })?;
-            let output = redact_output(output, Some(redactor));
-            io::stdout()
-                .write_all(&output.stdout)
-                .context("writing redacted interactive stdout")?;
-            io::stderr()
-                .write_all(&output.stderr)
-                .context("writing redacted interactive stderr")?;
-            output.status
+            let stdout = child.stdout.take().ok_or_else(|| {
+                anyhow!("interactive command stdout was not captured for redaction")
+            })?;
+            let stderr = child.stderr.take().ok_or_else(|| {
+                anyhow!("interactive command stderr was not captured for redaction")
+            })?;
+            let stdout_thread =
+                spawn_redaction_thread(stdout, RedactionTarget::Stdout, redactor.clone());
+            let stderr_thread = spawn_redaction_thread(stderr, RedactionTarget::Stderr, redactor);
+            let status = child.wait().with_context(|| {
+                format!("waiting for interactive task command '{}'", invocation.display_command)
+            })?;
+
+            stdout_thread
+                .join()
+                .map_err(|_| anyhow!("interactive stdout redaction thread panicked"))??;
+            stderr_thread
+                .join()
+                .map_err(|_| anyhow!("interactive stderr redaction thread panicked"))??;
+            status
         } else {
             command.status().with_context(|| {
                 format!("spawning interactive task command '{}'", invocation.display_command)
@@ -1040,7 +1052,7 @@ impl SecretRedactor {
         for key in secret_env_keys {
             if let Some(value) = resolved_env.get(key) {
                 let trimmed = value.trim();
-                if !trimmed.is_empty() {
+                if trimmed.len() >= 6 {
                     patterns.push(trimmed.to_string());
                 }
             }
@@ -1109,6 +1121,28 @@ fn prepare_task_invocation(
     }
 
     let shell_command = build_shell_command(&run_command, passthrough_args);
+
+    #[cfg(target_os = "windows")]
+    {
+        if task.shell_override.is_none() {
+            let script = create_temp_powershell_script(execution_root, &shell_command)?;
+            let program = resolve_windows_powershell_program()?;
+            let args = vec![
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-NoProfile".to_string(),
+                "-File".to_string(),
+                script.path().display().to_string(),
+            ];
+            return Ok(TaskInvocation {
+                display_command: shell_command,
+                program,
+                args,
+                _temp_script: Some(script),
+            });
+        }
+    }
+
     let (program, mut args) = resolve_shell_command(task.shell_override.as_ref())?;
     args.push(shell_command.clone());
     Ok(TaskInvocation { display_command: shell_command, program, args, _temp_script: None })
@@ -1140,6 +1174,29 @@ fn create_temp_shebang_script(execution_root: &Path, script_body: &str) -> Resul
     Ok(script)
 }
 
+#[cfg(target_os = "windows")]
+fn create_temp_powershell_script(
+    execution_root: &Path,
+    script_body: &str,
+) -> Result<NamedTempFile> {
+    let script_dir = execution_root.join(".broski/tmp");
+    fs::create_dir_all(&script_dir).with_context(|| {
+        format!("creating powershell temp directory '{}'", script_dir.display())
+    })?;
+    let mut script = tempfile::Builder::new()
+        .prefix("broski-script-")
+        .suffix(".ps1")
+        .tempfile_in(&script_dir)
+        .with_context(|| {
+            format!("creating powershell temp script in '{}'", script_dir.display())
+        })?;
+    script
+        .as_file_mut()
+        .write_all(script_body.as_bytes())
+        .context("writing powershell script body")?;
+    Ok(script)
+}
+
 fn resolve_shell_command(
     shell_override: Option<&crate::model::ShellSpec>,
 ) -> Result<(PathBuf, Vec<String>)> {
@@ -1152,13 +1209,10 @@ fn resolve_shell_command(
 
     #[cfg(target_os = "windows")]
     {
-        if let Ok(pwsh) = which::which("pwsh") {
-            return Ok((pwsh, vec!["-NoProfile".to_string(), "-Command".to_string()]));
-        }
-        if let Ok(cmd) = which::which("cmd") {
-            return Ok((cmd, vec!["/C".to_string()]));
-        }
-        Ok((PathBuf::from("cmd.exe"), vec!["/C".to_string()]))
+        Ok((
+            resolve_windows_powershell_program()?,
+            vec!["-NoProfile".to_string(), "-Command".to_string()],
+        ))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1186,6 +1240,17 @@ fn build_shell_command(run_command: &str, passthrough_args: &[String]) -> String
     command
 }
 
+#[cfg(target_os = "windows")]
+fn resolve_windows_powershell_program() -> Result<PathBuf> {
+    if let Ok(pwsh) = which::which("pwsh") {
+        return Ok(pwsh);
+    }
+    if let Ok(powershell) = which::which("powershell") {
+        return Ok(powershell);
+    }
+    Err(anyhow!("failed to locate PowerShell; install 'pwsh' (PowerShell Core) or 'powershell'"))
+}
+
 fn apply_param_bindings(input: &str, bindings: &BTreeMap<String, String>) -> String {
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0usize;
@@ -1211,11 +1276,27 @@ fn apply_param_bindings(input: &str, bindings: &BTreeMap<String, String>) -> Str
 }
 
 fn shell_escape(input: &str) -> String {
-    if input.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+    #[cfg(target_os = "windows")]
     {
-        return input.to_string();
+        if input
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+        {
+            return input.to_string();
+        }
+        return format!("'{}'", input.replace('\'', "''"));
     }
-    format!("'{}'", input.replace('\'', "'\"'\"'"))
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if input
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
+        {
+            return input.to_string();
+        }
+        format!("'{}'", input.replace('\'', "'\"'\"'"))
+    }
 }
 
 fn resolve_execution_dir(root: &Path, working_dir: Option<&str>) -> Result<PathBuf> {
@@ -1258,6 +1339,54 @@ fn load_env_files(workspace_root: &Path, files: &[String]) -> Result<BTreeMap<St
         }
     }
     Ok(env_map)
+}
+
+fn load_or_create_fingerprint_key(workspace_root: &Path) -> Result<[u8; 32]> {
+    let config_dir = workspace_root.join(".broski/config");
+    fs::create_dir_all(&config_dir).with_context(|| {
+        format!("creating fingerprint key config directory '{}'", config_dir.display())
+    })?;
+    let key_path = config_dir.join("salt");
+    if key_path.exists() {
+        let bytes = fs::read(&key_path)
+            .with_context(|| format!("reading fingerprint key file '{}'", key_path.display()))?;
+        if bytes.len() != 32 {
+            return Err(anyhow!(
+                "fingerprint key '{}' must contain exactly 32 bytes; found {}",
+                key_path.display(),
+                bytes.len()
+            ));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        return Ok(key);
+    }
+
+    let mut key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key);
+
+    let mut temp = tempfile::Builder::new()
+        .prefix("fingerprint-salt-")
+        .tempfile_in(&config_dir)
+        .with_context(|| format!("creating temp fingerprint key in '{}'", config_dir.display()))?;
+    temp.as_file_mut()
+        .write_all(&key)
+        .with_context(|| format!("writing temp fingerprint key in '{}'", config_dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = temp
+            .as_file()
+            .metadata()
+            .context("reading fingerprint key temp metadata")?
+            .permissions();
+        perms.set_mode(0o600);
+        temp.as_file().set_permissions(perms).context("setting fingerprint key permissions")?;
+    }
+    temp.persist(&key_path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("persisting fingerprint key to '{}'", key_path.display()))?;
+    Ok(key)
 }
 
 fn normalize_outputs(task: &TaskSpec) -> Result<Vec<PathBuf>> {
@@ -1471,6 +1600,119 @@ fn describe_manifest_change(action: &str, key: &str) -> String {
     format!("cache miss: {key} {action}")
 }
 
+enum RedactionTarget {
+    Stdout,
+    Stderr,
+}
+
+fn spawn_redaction_thread<R: io::Read + Send + 'static>(
+    stream: R,
+    target: RedactionTarget,
+    redactor: SecretRedactor,
+) -> thread::JoinHandle<Result<()>> {
+    thread::spawn(move || stream_redacted_output(stream, target, &redactor))
+}
+
+fn stream_redacted_output<R: io::Read>(
+    stream: R,
+    target: RedactionTarget,
+    redactor: &SecretRedactor,
+) -> Result<()> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).context("reading interactive output stream")?;
+        if bytes == 0 {
+            break;
+        }
+        let redacted = redactor.redact_text(&line);
+        match target {
+            RedactionTarget::Stdout => {
+                let mut stdout = io::stdout().lock();
+                stdout
+                    .write_all(redacted.as_bytes())
+                    .context("writing redacted interactive stdout")?;
+                stdout.flush().context("flushing redacted interactive stdout")?;
+            }
+            RedactionTarget::Stderr => {
+                let mut stderr = io::stderr().lock();
+                stderr
+                    .write_all(redacted.as_bytes())
+                    .context("writing redacted interactive stderr")?;
+                stderr.flush().context("flushing redacted interactive stderr")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_strict_bwrap_args(
+    stage_workspace: &Path,
+    invocation: &TaskInvocation,
+    home_dir: Option<&Path>,
+) -> Vec<OsString> {
+    let mut args = vec![
+        "--die-with-parent".into(),
+        "--new-session".into(),
+        "--unshare-net".into(),
+        "--ro-bind".into(),
+        "/usr".into(),
+        "/usr".into(),
+        "--ro-bind".into(),
+        "/bin".into(),
+        "/bin".into(),
+        "--ro-bind".into(),
+        "/lib".into(),
+        "/lib".into(),
+    ];
+    if Path::new("/lib64").exists() {
+        args.push("--ro-bind".into());
+        args.push("/lib64".into());
+        args.push("/lib64".into());
+    }
+    args.push("--dir".into());
+    args.push("/etc".into());
+    args.push("--ro-bind-try".into());
+    args.push("/etc/resolv.conf".into());
+    args.push("/etc/resolv.conf".into());
+
+    if let Some(home_dir) = home_dir.filter(|path| path.is_absolute()) {
+        append_bwrap_home_mask_args(&mut args, home_dir);
+    }
+
+    args.push("--bind".into());
+    args.push(stage_workspace.as_os_str().to_os_string());
+    args.push(stage_workspace.as_os_str().to_os_string());
+    args.push("--proc".into());
+    args.push("/proc".into());
+    args.push("--dev".into());
+    args.push("/dev".into());
+    args.push("--tmpfs".into());
+    args.push("/tmp".into());
+    args.push("--chdir".into());
+    args.push(stage_workspace.as_os_str().to_os_string());
+    args.push(invocation.program.as_os_str().to_os_string());
+    args.extend(invocation.args.iter().map(OsString::from));
+    args
+}
+
+fn append_bwrap_home_mask_args(args: &mut Vec<OsString>, home_dir: &Path) {
+    if home_dir == Path::new("/") {
+        return;
+    }
+    let mut cursor = PathBuf::from("/");
+    for component in home_dir.components() {
+        if let Component::Normal(segment) = component {
+            cursor.push(segment);
+            args.push("--dir".into());
+            args.push(cursor.as_os_str().to_os_string());
+        }
+    }
+    args.push("--tmpfs".into());
+    args.push(home_dir.as_os_str().to_os_string());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1658,6 +1900,41 @@ mod tests {
         assert!(stderr.contains("[REDACTED]"));
     }
 
+    #[test]
+    fn redactor_ignores_short_values() {
+        let redactor = SecretRedactor::from_env(
+            &BTreeMap::from([
+                ("TOO_SHORT".to_string(), "1".to_string()),
+                ("TOKEN".to_string(), "supersecret".to_string()),
+            ]),
+            &BTreeSet::from(["TOO_SHORT".to_string(), "TOKEN".to_string()]),
+        )
+        .expect("redactor");
+
+        let output = Output {
+            status: success_exit_status(),
+            stdout: b"value=1 token=supersecret".to_vec(),
+            stderr: Vec::new(),
+        };
+        let redacted = redact_output(output, Some(&redactor));
+        let stdout = String::from_utf8_lossy(&redacted.stdout);
+        assert!(stdout.contains("value=1"));
+        assert!(!stdout.contains("supersecret"));
+        assert!(stdout.contains("token=[REDACTED]"));
+    }
+
+    #[test]
+    fn fingerprint_key_is_created_and_reused() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path();
+        let first = load_or_create_fingerprint_key(workspace).expect("first key");
+        let second = load_or_create_fingerprint_key(workspace).expect("second key");
+        assert_eq!(first, second);
+        let bytes =
+            fs::read(workspace.join(".broski/config/salt")).expect("read fingerprint key file");
+        assert_eq!(bytes.len(), 32);
+    }
+
     fn success_exit_status() -> std::process::ExitStatus {
         #[cfg(unix)]
         {
@@ -1712,21 +1989,39 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn default_shell_prefers_pwsh_then_cmd() {
+    fn default_shell_prefers_pwsh_then_windows_powershell() {
         let (program, args) = resolve_shell_command(None).expect("resolve shell");
         let name = program.file_name().and_then(|part| part.to_str()).unwrap_or_default();
         assert!(
             name.eq_ignore_ascii_case("pwsh.exe")
                 || name.eq_ignore_ascii_case("pwsh")
-                || name.eq_ignore_ascii_case("cmd.exe")
-                || name.eq_ignore_ascii_case("cmd"),
+                || name.eq_ignore_ascii_case("powershell.exe")
+                || name.eq_ignore_ascii_case("powershell"),
             "unexpected shell program: {}",
             program.display()
         );
-        assert!(
-            args == vec!["-NoProfile".to_string(), "-Command".to_string()]
-                || args == vec!["/C".to_string()]
-        );
+        assert_eq!(args, vec!["-NoProfile".to_string(), "-Command".to_string()]);
+    }
+
+    #[test]
+    fn strict_bwrap_args_limit_mount_surface() {
+        let stage = PathBuf::from("/tmp/broski-stage");
+        let home = PathBuf::from("/home/tester");
+        let invocation = TaskInvocation {
+            display_command: "echo hi".to_string(),
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-lc".to_string(), "echo hi".to_string()],
+            _temp_script: None,
+        };
+        let args = build_strict_bwrap_args(&stage, &invocation, Some(home.as_path()));
+        let rendered: Vec<String> =
+            args.iter().map(|arg| arg.to_string_lossy().to_string()).collect();
+
+        assert!(rendered.windows(3).any(|w| w == ["--ro-bind", "/usr", "/usr"]));
+        assert!(rendered.windows(3).any(|w| w == ["--ro-bind", "/bin", "/bin"]));
+        assert!(rendered.windows(3).any(|w| w == ["--ro-bind", "/lib", "/lib"]));
+        assert!(rendered.windows(2).any(|w| w == ["--tmpfs", "/home/tester"]));
+        assert!(!rendered.windows(3).any(|w| w == ["--ro-bind", "/", "/"]));
     }
 
     #[cfg(target_os = "linux")]
@@ -1734,25 +2029,23 @@ mod tests {
         let Ok(bwrap) = which::which("bwrap") else {
             return false;
         };
+        let stage = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(_) => return false,
+        };
+        let invocation = TaskInvocation {
+            display_command: "echo BROSKI_BWRAP_TEST".to_string(),
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-lc".to_string(), "echo BROSKI_BWRAP_TEST".to_string()],
+            _temp_script: None,
+        };
+        let args = build_strict_bwrap_args(
+            stage.path(),
+            &invocation,
+            env::var_os("HOME").as_deref().map(Path::new),
+        );
 
-        let Ok(output) = ProcessCommand::new(bwrap)
-            .arg("--die-with-parent")
-            .arg("--new-session")
-            .arg("--unshare-net")
-            .arg("--ro-bind")
-            .arg("/")
-            .arg("/")
-            .arg("--proc")
-            .arg("/proc")
-            .arg("--dev")
-            .arg("/dev")
-            .arg("--tmpfs")
-            .arg("/tmp")
-            .arg("/bin/sh")
-            .arg("-lc")
-            .arg("echo BROSKI_BWRAP_TEST")
-            .output()
-        else {
+        let Ok(output) = ProcessCommand::new(bwrap).args(args).output() else {
             return false;
         };
 

@@ -3,7 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use broski_core::fingerprint::compute_fingerprint;
+use broski_core::fingerprint::{compute_fingerprint, FingerprintOptions};
 use broski_core::graph::TaskGraph;
 use broski_core::model::{RunSpec, TaskSpec};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
@@ -59,6 +59,7 @@ fn benchmark_fingerprint(c: &mut Criterion) {
         let resolved_env = BTreeMap::new();
         let secret_env = BTreeSet::new();
         let passthrough = Vec::new();
+        let secret_key = [7u8; 32];
 
         b.iter(|| {
             let fp = compute_fingerprint(
@@ -68,7 +69,7 @@ fn benchmark_fingerprint(c: &mut Criterion) {
                 &resolved,
                 &resolved_env,
                 &secret_env,
-                &passthrough,
+                FingerprintOptions { passthrough_args: &passthrough, secret_env_key: &secret_key },
             )
             .expect("fingerprint");
             black_box(fp);

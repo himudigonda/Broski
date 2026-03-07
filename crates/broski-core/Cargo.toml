@@ -17,6 +17,7 @@ notify.workspace = true
 petgraph.workspace = true
 rayon.workspace = true
 reflink-copy.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true

@@ -9,10 +9,11 @@ This page is full command reference. It is intentionally dense.
 ## Command forms
 
 ```bash
+broski --workspace <path> <command>
 broski <task> [task-args...] [flags]
 broski run <task> [task-args...] [flags]
 broski list
-broski graph <task> --format tree|dot
+broski graph <task> --format text|dot
 broski doctor [--repair|--no-repair]
 broski cache prune --max-size <MB>
 ```
@@ -36,6 +37,18 @@ These flags apply to `broski <task>` and `broski run <task>`.
 | `--watch` | off | Re-run target graph on input changes. | See [Watch Mode](./watch-mode). |
 | `--force-isolation` | off | Force strict isolation for graph tasks. | Not supported for interactive tasks. |
 | `--jobs <n>` | auto | Override worker concurrency. | Explicit run supports `--jobs <n>`. Implicit run supports `--jobs=<n>`. |
+
+## Global flags
+
+| Flag | Effect |
+| --- | --- |
+| `--workspace <path>` | Resolve `broskifile`, cache state, runtime lock, and paths relative to this workspace root. |
+
+Example:
+
+```bash
+broski --workspace /path/to/repo run ci --explain
+```
 
 ### Important parsing detail
 
@@ -76,12 +89,12 @@ broski run build api release --force-isolation
 broski test -- --grep slow
 ```
 
-### `broski graph <task> --format tree|dot`
+### `broski graph <task> --format text|dot`
 
 Show dependency graph for a target.
 
 ```bash
-broski graph ci --format tree
+broski graph ci --format text
 broski graph ci --format dot > graph.dot
 ```
 
@@ -147,6 +160,8 @@ broski run build --explain
 
 ```bash
 broski run ci --jobs 12
+# implicit form must use equals
+broski ci --jobs=12
 ```
 
 ### Interactive task with task-level passthrough
@@ -168,7 +183,7 @@ broski dev -- --host 0.0.0.0
 | --- | --- | --- |
 | Show tasks | `make help` / `just --list` | `broski list` |
 | Run pipeline | `make ci` / `just ci` | `broski ci` |
-| Render dependency graph | manual / limited | `broski graph ci --format tree` |
+| Render dependency graph | manual / limited | `broski graph ci --format text` |
 | Force execution | phony/manual | `broski run ci --force` |
 | Explain rebuilds | not first-class | `broski run ci --explain` |
 | Cache trim | manual cleanup scripts | `broski cache prune --max-size 512` |
@@ -178,4 +193,6 @@ broski dev -- --host 0.0.0.0
 - [Watch Mode](./watch-mode)
 - [Annotations](../dsl/annotations)
 - [Migration Playbook](../operations/migration)
+- [Anti-Patterns](../operations/anti-patterns)
+- [Common Mistakes](../operations/common-mistakes)
 - [Troubleshooting](../operations/troubleshooting)
