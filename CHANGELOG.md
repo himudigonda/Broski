@@ -18,6 +18,10 @@ All notable changes to this project are documented in this file.
 
 ### Documentation
 - Added deep-dive security hardening report at `docs/reports/v0.5.2-security-hardening.md` (includes Make/Just/Broski comparison and residual risk notes).
+- Expanded docs portal coverage for migration-heavy teams:
+  - dedicated `Anti-Patterns`, `Common Mistakes`, and `FAQ` pages under operations.
+  - broader command/flag usage examples and corrected graph format docs (`text|dot`).
+- Added attribution note to README and docs surfaces.
 
 ## [0.5.1] - 2026-03-05
 

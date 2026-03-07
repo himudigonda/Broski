@@ -121,7 +121,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Himansh Mudigonda. Built with Docusaurus.`,
+      copyright: `Copyright © ${new Date().getFullYear()} Himansh Mudigonda. Built with Docusaurus. This codebase was built with help from Codex-5.3-Extra-High. Gemini 3.1 Pro helped with the docs.`,
     },
     prism: {
       theme: prismThemes.gruvboxMaterialLight,

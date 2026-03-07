@@ -92,3 +92,5 @@ Then check the portal troubleshooting and architecture sections.
 ## License
 
 MIT. See `LICENSE`.
+
+This codebase was built with help from Codex-5.3-Extra-High. Gemini 3.1 Pro helped with the docs.
