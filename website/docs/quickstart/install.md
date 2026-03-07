@@ -15,7 +15,7 @@ curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh 
 ## Pinned Version
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.5.2 bash
+curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.6.1 bash
 ```
 
 ## Verify

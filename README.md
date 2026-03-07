@@ -2,7 +2,7 @@
 
 ![Broski Banner](website/static/img/branding/broski_banner.png)
 
-[![Version](https://img.shields.io/badge/version-v0.5.2-blue)](https://github.com/himudigonda/Broski/releases/tag/v0.5.2)
+[![Version](https://img.shields.io/badge/version-v0.6.1-blue)](https://github.com/himudigonda/Broski/releases/tag/v0.6.1)
 [![CI](https://img.shields.io/github/actions/workflow/status/himudigonda/Broski/ci.yml?branch=main&label=build)](https://github.com/himudigonda/Broski/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange)](https://www.rust-lang.org/)
@@ -74,7 +74,7 @@ broski --version
 Pinned install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.5.2 bash
+curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.6.1 bash
 ```
 
 ## Benchmark Snapshot (TaskPulse, March 7, 2026)

@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.1] - 2026-03-07
+
+### Stabilization
+- Validated `0.6.0` integration on `codex/0.6.0-optimizations` with full local quality gates (`fmt`, `clippy`, workspace tests, docs build).
+- Rebuilt fresh baseline (`v0.5.2`) and candidate (`0.6.0`) binaries and ran the TaskPulse benchmark matrix in `/Users/himudigonda/Desktop/test/benchmark`.
+- Confirmed Desktop TaskPulse smoke workflow (`setup`, `ci --explain`, implicit `ci --jobs=4`, `doctor`, `cache prune`) passes end-to-end.
+
+### Documentation and Positioning
+- Repositioned README and quickstart docs around low-ceremony adoption: copy commands first, then add `@in` and `@out` for caching.
+- Promoted `--explain` and rollback-safe output promotion as the primary differentiators.
+- Added a `Progressive Adoption` section in the migration guide for Make/Just users.
+
+### Hygiene
+- Hardened `dumper.sh` ignore rules to exclude `.env.*` and `.vercel` paths from dump output.
+- Renamed `examples/basic/pleasefile` to `examples/basic/broskifile` to remove legacy naming drift.
+
 ## [0.5.2] - 2026-03-06
 
 ### Security
