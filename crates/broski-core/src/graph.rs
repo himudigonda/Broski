@@ -202,6 +202,7 @@ mod tests {
             description: None,
             resolved_variables: BTreeMap::new(),
             inputs: vec!["src/main.rs".to_string()],
+            stage_ro: Vec::new(),
             outputs: vec!["dist/out.txt".to_string()],
             env: BTreeMap::new(),
             env_inherit: Vec::new(),

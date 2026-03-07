@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 broski-store = { path = "../broski-store" }
+reflink-copy.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 walkdir.workspace = true

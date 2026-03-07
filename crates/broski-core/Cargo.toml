@@ -9,6 +9,7 @@ aho-corasick.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 glob.workspace = true
+ignore.workspace = true
 indicatif.workspace = true
 libc.workspace = true
 miette.workspace = true

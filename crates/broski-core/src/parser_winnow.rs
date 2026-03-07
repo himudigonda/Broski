@@ -47,6 +47,7 @@ struct TaskDraft {
     description: Option<String>,
     resolved_variables: BTreeMap<String, String>,
     inputs: Vec<String>,
+    stage_ro: Vec<String>,
     outputs: Vec<String>,
     env: BTreeMap<String, String>,
     env_inherit: Vec<String>,
@@ -267,6 +268,12 @@ pub fn parse_broskifile_dsl_with_workspace(
             continue;
         }
 
+        if let Some(rest) = body.strip_prefix("@stage_ro") {
+            let values = split_items(rest, line_no, "@stage_ro")?;
+            task.stage_ro.extend(values);
+            continue;
+        }
+
         if let Some(rest) = body.strip_prefix("@out") {
             let values = split_items(rest, line_no, "@out")?;
             task.outputs.extend(values);
@@ -406,6 +413,7 @@ pub fn parse_broskifile_dsl_with_workspace(
                 description: draft.description,
                 resolved_variables: draft.resolved_variables,
                 inputs: draft.inputs,
+                stage_ro: draft.stage_ro,
                 outputs: draft.outputs,
                 env: draft.env,
                 env_inherit: draft.env_inherit,
@@ -1147,6 +1155,7 @@ mod tests {
 
             build: prep
                 @in src/**/*.rs Cargo.toml
+                @stage_ro frontend/node_modules backend/.venv
                 @out dist/out.txt
                 @env MODE=dev
                 @env PATH
@@ -1167,6 +1176,7 @@ mod tests {
         assert_eq!(parsed.alias.get("b"), Some(&"build".to_string()));
         let build = parsed.task.get("build").expect("build task");
         assert_eq!(build.inputs.len(), 2);
+        assert_eq!(build.stage_ro.len(), 2);
         assert_eq!(build.outputs.len(), 1);
         assert_eq!(build.env.get("MODE"), Some(&"dev".to_string()));
         assert!(build.env_inherit.contains(&"PATH".to_string()));

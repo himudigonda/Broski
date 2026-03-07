@@ -56,6 +56,8 @@ pub struct TaskSpec {
     #[serde(default)]
     pub inputs: Vec<String>,
     #[serde(default)]
+    pub stage_ro: Vec<String>,
+    #[serde(default)]
     pub outputs: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,

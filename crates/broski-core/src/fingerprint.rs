@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::model::TaskSpec;
@@ -57,6 +58,9 @@ pub fn compute_fingerprint(
     for (idx, pattern) in task.inputs.iter().enumerate() {
         manifest.insert(format!("input_pattern:{idx}:{pattern}"), digest_value(pattern));
     }
+    for path in &task.stage_ro {
+        manifest.insert(format!("stage_ro:{path}"), digest_value(path));
+    }
 
     for (key, value) in resolved_env {
         if secret_env_keys.contains(key) {
@@ -69,16 +73,23 @@ pub fn compute_fingerprint(
         }
     }
 
-    for input in resolved_inputs {
-        let absolute = workspace_root.join(input);
-        let entry_key = format!("input:{}", input.to_string_lossy());
-        if absolute.exists() {
-            let digest = hash_path(&absolute)
-                .with_context(|| format!("hashing input '{}'", absolute.display()))?;
-            manifest.insert(entry_key, digest);
-        } else {
-            manifest.insert(entry_key, digest_value("missing"));
-        }
+    let mut input_entries: Vec<(String, String)> = resolved_inputs
+        .par_iter()
+        .map(|input| -> Result<(String, String)> {
+            let absolute = workspace_root.join(input);
+            let entry_key = format!("input:{}", input.to_string_lossy());
+            if absolute.exists() {
+                let digest = hash_path(&absolute)
+                    .with_context(|| format!("hashing input '{}'", absolute.display()))?;
+                Ok((entry_key, digest))
+            } else {
+                Ok((entry_key, digest_value("missing")))
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    input_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (key, value) in input_entries {
+        manifest.insert(key, value);
     }
 
     for output in &task.outputs {
@@ -184,6 +195,7 @@ mod tests {
             description: None,
             resolved_variables: BTreeMap::new(),
             inputs: vec!["src/main.rs".to_string()],
+            stage_ro: Vec::new(),
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
             env_inherit: Vec::new(),
@@ -291,6 +303,7 @@ mod tests {
             description: None,
             resolved_variables: BTreeMap::new(),
             inputs: vec!["src/missing.txt".to_string()],
+            stage_ro: Vec::new(),
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
             env_inherit: Vec::new(),
@@ -336,6 +349,7 @@ mod tests {
             description: None,
             resolved_variables: BTreeMap::new(),
             inputs: vec!["src".to_string()],
+            stage_ro: Vec::new(),
             outputs: vec!["dist/out".to_string()],
             env: BTreeMap::new(),
             env_inherit: Vec::new(),

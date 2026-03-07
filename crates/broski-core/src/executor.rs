@@ -8,7 +8,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aho_corasick::AhoCorasick;
 use anyhow::{anyhow, Context, Result};
@@ -68,6 +68,17 @@ struct TaskOutcome {
     from_cache: bool,
     dry_run: bool,
     cache_miss_reasons: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct TaskPhaseTimings {
+    resolve_inputs: Option<Duration>,
+    fingerprint: Option<Duration>,
+    cache_restore: Option<Duration>,
+    stage_prep: Option<Duration>,
+    command_exec: Option<Duration>,
+    output_promote: Option<Duration>,
+    cache_store: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -444,7 +455,15 @@ impl Executor {
         }
 
         let outputs = normalize_outputs(&task)?;
+        let stage_ro = normalize_paths(&task.stage_ro)?;
+        let mut timings = TaskPhaseTimings::default();
+        let show_timings = options.explain || profile_enabled();
+
+        let started_resolve_inputs = Instant::now();
         let inputs = resolve_inputs(&self.workspace_root, &task.inputs)?;
+        timings.resolve_inputs = Some(started_resolve_inputs.elapsed());
+
+        let started_fingerprint = Instant::now();
         let fingerprint_result = compute_fingerprint(
             &self.workspace_root,
             task_name,
@@ -457,6 +476,7 @@ impl Executor {
                 secret_env_key: &self.fingerprint_key,
             },
         )?;
+        timings.fingerprint = Some(started_fingerprint.elapsed());
         let mut cache_miss_reasons = Vec::new();
 
         if !options.force && !options.no_cache {
@@ -481,9 +501,11 @@ impl Executor {
                     });
                 }
 
+                let started_restore = Instant::now();
                 self.store
                     .restore_artifacts(&self.workspace_root, &record.artifacts)
                     .with_context(|| format!("restoring cache hit for task '{}'", task_name))?;
+                timings.cache_restore = Some(started_restore.elapsed());
 
                 if show_progress {
                     emit_progress(
@@ -498,7 +520,7 @@ impl Executor {
                     task_name: task_name.to_string(),
                     from_cache: true,
                     dry_run: false,
-                    cache_miss_reasons: Vec::new(),
+                    cache_miss_reasons: timing_lines(task_name, &timings, show_timings),
                 });
             }
         }
@@ -523,7 +545,11 @@ impl Executor {
             });
         }
 
-        let stage = self.create_stage_snapshot(task_name)?;
+        let started_stage = Instant::now();
+        let stage = self.create_stage_snapshot(task_name, &inputs, &stage_ro)?;
+        timings.stage_prep = Some(started_stage.elapsed());
+
+        let started_command = Instant::now();
         let output = self
             .run_task_command(
                 task_name,
@@ -534,6 +560,7 @@ impl Executor {
                 options,
             )
             .with_context(|| format!("executing task '{}'", task_name))?;
+        timings.command_exec = Some(started_command.elapsed());
         let output = redact_output(output, redactor.as_ref());
 
         if !output.status.success() {
@@ -554,11 +581,15 @@ impl Executor {
             ));
         }
 
+        let started_promote = Instant::now();
         self.promote_outputs(stage.path(), &outputs)
             .with_context(|| format!("promoting outputs for task '{}'", task_name))?;
+        timings.output_promote = Some(started_promote.elapsed());
 
         if !options.no_cache {
+            let started_store = Instant::now();
             let artifacts = self.store.store_artifacts(&self.workspace_root, &outputs)?;
+            timings.cache_store = Some(started_store.elapsed());
             let record = ExecutionRecord {
                 task_name: task_name.to_string(),
                 fingerprint: fingerprint_result.fingerprint.0,
@@ -581,7 +612,12 @@ impl Executor {
             task_name: task_name.to_string(),
             from_cache: false,
             dry_run: false,
-            cache_miss_reasons,
+            cache_miss_reasons: {
+                if show_timings {
+                    cache_miss_reasons.extend(timing_lines(task_name, &timings, true));
+                }
+                cache_miss_reasons
+            },
         })
     }
 
@@ -609,7 +645,12 @@ impl Executor {
         Ok(reasons)
     }
 
-    fn create_stage_snapshot(&self, task_name: &str) -> Result<TempDir> {
+    fn create_stage_snapshot(
+        &self,
+        task_name: &str,
+        inputs: &[PathBuf],
+        stage_ro: &[PathBuf],
+    ) -> Result<TempDir> {
         let stage_parent = self.workspace_root.join(".broski/stage");
         fs::create_dir_all(&stage_parent)
             .with_context(|| format!("creating stage parent '{}'", stage_parent.display()))?;
@@ -619,7 +660,8 @@ impl Executor {
             .tempdir_in(&stage_parent)
             .with_context(|| format!("creating stage dir for task '{}'", task_name))?;
 
-        copy_workspace_snapshot(&self.workspace_root, stage.path())?;
+        copy_input_snapshot(&self.workspace_root, stage.path(), inputs)?;
+        create_stage_readonly_links(&self.workspace_root, stage.path(), stage_ro)?;
 
         Ok(stage)
     }
@@ -795,6 +837,8 @@ impl Executor {
 
         resolved.inputs =
             resolved.inputs.iter().map(|value| apply_param_bindings(value, &bindings)).collect();
+        resolved.stage_ro =
+            resolved.stage_ro.iter().map(|value| apply_param_bindings(value, &bindings)).collect();
         resolved.outputs =
             resolved.outputs.iter().map(|value| apply_param_bindings(value, &bindings)).collect();
         resolved.env = resolved
@@ -1397,50 +1441,87 @@ fn normalize_outputs(task: &TaskSpec) -> Result<Vec<PathBuf>> {
     Ok(outputs)
 }
 
-fn copy_workspace_snapshot(source_root: &Path, stage_root: &Path) -> Result<()> {
-    for entry in WalkDir::new(source_root)
-        .into_iter()
-        .filter_entry(|entry| should_include(entry, source_root))
-    {
-        let entry = entry.context("walking workspace snapshot")?;
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(source_root)
-            .with_context(|| format!("stripping workspace prefix '{}'", source_root.display()))?;
+fn normalize_paths(raw_paths: &[String]) -> Result<Vec<PathBuf>> {
+    let mut normalized = Vec::with_capacity(raw_paths.len());
+    for item in raw_paths {
+        normalized.push(normalize_relative_path(item)?);
+    }
+    Ok(normalized)
+}
 
-        if rel.as_os_str().is_empty() {
+fn copy_input_snapshot(source_root: &Path, stage_root: &Path, inputs: &[PathBuf]) -> Result<()> {
+    let mut copied = BTreeSet::new();
+    for rel in inputs {
+        if !copied.insert(rel.clone()) {
             continue;
         }
-
-        let target = stage_root.join(rel);
-
-        if entry.file_type().is_dir() {
-            fs::create_dir_all(&target)
-                .with_context(|| format!("creating stage directory '{}'", target.display()))?;
-        } else if entry.file_type().is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("creating parent '{}'", parent.display()))?;
-            }
-            copy_file_with_reflink_fallback(path, &target)
-                .with_context(|| format!("copying workspace file '{}' to stage", path.display()))?;
-        } else if entry.file_type().is_symlink() {
-            #[cfg(unix)]
+        let source = source_root.join(rel);
+        if !source.exists() {
+            continue;
+        }
+        if source.is_file() || source.is_symlink() {
+            copy_snapshot_file_or_link(source_root, stage_root, &source)?;
+            continue;
+        }
+        if source.is_dir() {
+            for entry in WalkDir::new(&source)
+                .into_iter()
+                .filter_entry(|entry| should_include(entry, source_root))
             {
-                use std::os::unix::fs::symlink;
-
-                let target_link = fs::read_link(path)
-                    .with_context(|| format!("reading symlink '{}'", path.display()))?;
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)
-                        .with_context(|| format!("creating parent '{}'", parent.display()))?;
+                let entry = entry.context("walking input snapshot directory")?;
+                let path = entry.path();
+                if path.is_dir() {
+                    continue;
                 }
-                symlink(target_link, &target)
-                    .with_context(|| format!("creating symlink '{}'", target.display()))?;
+                copy_snapshot_file_or_link(source_root, stage_root, path)?;
             }
         }
     }
+    Ok(())
+}
 
+fn copy_snapshot_file_or_link(source_root: &Path, stage_root: &Path, source: &Path) -> Result<()> {
+    let rel = source
+        .strip_prefix(source_root)
+        .with_context(|| format!("stripping workspace prefix '{}'", source_root.display()))?;
+    let target = stage_root.join(rel);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent '{}'", parent.display()))?;
+    }
+    if source.is_symlink() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target_link = fs::read_link(source)
+                .with_context(|| format!("reading symlink '{}'", source.display()))?;
+            symlink(target_link, &target)
+                .with_context(|| format!("creating symlink '{}'", target.display()))?;
+            return Ok(());
+        }
+    }
+    copy_file_with_reflink_fallback(source, &target)
+        .with_context(|| format!("copying workspace file '{}' to stage", source.display()))
+}
+
+fn create_stage_readonly_links(
+    source_root: &Path,
+    stage_root: &Path,
+    stage_ro: &[PathBuf],
+) -> Result<()> {
+    for rel in stage_ro {
+        let src = source_root.join(rel);
+        if !src.exists() {
+            return Err(anyhow!("@stage_ro path '{}' does not exist", rel.display()));
+        }
+        let dst = stage_root.join(rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent '{}'", parent.display()))?;
+        }
+        remove_path_if_exists(&dst)?;
+        create_readonly_link_or_copy(&src, &dst)?;
+    }
     Ok(())
 }
 
@@ -1525,6 +1606,27 @@ fn copy_file_with_reflink_fallback(src: &Path, dest: &Path) -> Result<()> {
     }
 }
 
+fn create_readonly_link_or_copy(src: &Path, dst: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        if symlink(src, dst).is_ok() {
+            return Ok(());
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        let result = if src.is_dir() { symlink_dir(src, dst) } else { symlink_file(src, dst) };
+        if result.is_ok() {
+            return Ok(());
+        }
+    }
+
+    copy_tree(src, dst)
+}
+
 fn is_reflink_unsupported(error: &io::Error) -> bool {
     if error.kind() == io::ErrorKind::Unsupported {
         return true;
@@ -1538,6 +1640,47 @@ fn is_reflink_unsupported(error: &io::Error) -> bool {
                 || code == libc::EXDEV
                 || code == libc::EINVAL
     )
+}
+
+fn profile_enabled() -> bool {
+    env::var("BROSKI_PROFILE")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn timing_lines(task_name: &str, timings: &TaskPhaseTimings, enabled: bool) -> Vec<String> {
+    if !enabled {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    if let Some(value) = timings.resolve_inputs {
+        lines.push(format!("timing: resolve_inputs={}ms", value.as_millis()));
+    }
+    if let Some(value) = timings.fingerprint {
+        lines.push(format!("timing: fingerprint={}ms", value.as_millis()));
+    }
+    if let Some(value) = timings.cache_restore {
+        lines.push(format!("timing: cache_restore={}ms", value.as_millis()));
+    }
+    if let Some(value) = timings.stage_prep {
+        lines.push(format!("timing: stage_prep={}ms", value.as_millis()));
+    }
+    if let Some(value) = timings.command_exec {
+        lines.push(format!("timing: command_exec={}ms", value.as_millis()));
+    }
+    if let Some(value) = timings.output_promote {
+        lines.push(format!("timing: output_promote={}ms", value.as_millis()));
+    }
+    if let Some(value) = timings.cache_store {
+        lines.push(format!("timing: cache_store={}ms", value.as_millis()));
+    }
+    if profile_enabled() && !lines.is_empty() {
+        eprintln!("profile {}:", task_name);
+        for line in &lines {
+            eprintln!("- {}", line);
+        }
+    }
+    lines
 }
 
 fn remove_path_if_exists(path: &Path) -> Result<()> {
@@ -1738,6 +1881,7 @@ mod tests {
             description: None,
             resolved_variables: BTreeMap::new(),
             inputs: vec!["src/input.txt".to_string()],
+            stage_ro: vec![],
             outputs: vec!["dist/output.txt".to_string()],
             env: BTreeMap::new(),
             env_inherit: Vec::new(),
@@ -1805,7 +1949,8 @@ mod tests {
 
         let stage = tempfile::tempdir_in(tmp.path()).expect("create stage dir");
         let start = Instant::now();
-        copy_workspace_snapshot(&workspace, stage.path()).expect("copy workspace snapshot");
+        copy_input_snapshot(&workspace, stage.path(), &[PathBuf::from("data/large.bin")])
+            .expect("copy workspace snapshot");
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_secs(20),
@@ -1818,6 +1963,23 @@ mod tests {
         let source_hash = file_hash(&source_file).expect("hash source");
         let staged_hash = file_hash(&stage_file).expect("hash stage");
         assert_eq!(source_hash, staged_hash, "staged file hash mismatch");
+    }
+
+    #[test]
+    fn stage_snapshot_copies_only_declared_inputs() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src dir");
+        fs::create_dir_all(workspace.join("tmp")).expect("create tmp dir");
+        fs::write(workspace.join("src/input.txt"), "hello").expect("write input");
+        fs::write(workspace.join("tmp/other.txt"), "skip").expect("write other");
+
+        let stage = tempfile::tempdir_in(tmp.path()).expect("create stage dir");
+        copy_input_snapshot(&workspace, stage.path(), &[PathBuf::from("src/input.txt")])
+            .expect("copy input snapshot");
+
+        assert!(stage.path().join("src/input.txt").exists());
+        assert!(!stage.path().join("tmp/other.txt").exists());
     }
 
     fn file_hash(path: &Path) -> Result<String> {
@@ -1954,6 +2116,7 @@ mod tests {
             description: None,
             resolved_variables: BTreeMap::new(),
             inputs: vec![],
+            stage_ro: vec![],
             outputs: vec![],
             env: BTreeMap::new(),
             env_inherit: Vec::new(),
@@ -2076,6 +2239,7 @@ mod tests {
                 description: None,
                 resolved_variables: BTreeMap::new(),
                 inputs: vec!["src/input.txt".to_string()],
+                stage_ro: vec![],
                 outputs: vec!["dist/output.txt".to_string()],
                 env: BTreeMap::new(),
                 env_inherit: Vec::new(),
@@ -2126,6 +2290,7 @@ mod tests {
                 description: None,
                 resolved_variables: BTreeMap::new(),
                 inputs: vec!["src/input.txt".to_string()],
+                stage_ro: vec![],
                 outputs: vec!["dist/output.txt".to_string()],
                 env: BTreeMap::new(),
                 env_inherit: Vec::new(),

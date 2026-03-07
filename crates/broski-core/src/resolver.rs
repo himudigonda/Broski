@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use ignore::WalkBuilder;
 
 pub fn resolve_inputs(workspace_root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
     let mut resolved = BTreeSet::new();
@@ -10,32 +11,62 @@ pub fn resolve_inputs(workspace_root: &Path, patterns: &[String]) -> Result<Vec<
         validate_pattern(pattern)?;
 
         if looks_like_glob(pattern) {
-            let absolute_pattern = workspace_root.join(pattern);
-            let pattern_text = absolute_pattern
-                .to_str()
-                .ok_or_else(|| anyhow!("non UTF-8 input pattern '{}'", pattern))?;
-
             let mut found = false;
-            for entry in glob::glob(pattern_text)
-                .with_context(|| format!("resolving input glob '{}'", pattern))?
-            {
-                let path = entry.with_context(|| format!("expanding input glob '{}'", pattern))?;
-                if !path.exists() {
-                    continue;
+            if pattern.contains("**") {
+                let matcher = glob::Pattern::new(pattern)
+                    .with_context(|| format!("invalid input glob '{}'", pattern))?;
+                let mut builder = WalkBuilder::new(workspace_root);
+                builder.git_ignore(true).git_exclude(true).git_global(true);
+                let walker = builder.build();
+                for entry in walker {
+                    let entry =
+                        entry.with_context(|| format!("expanding input glob '{}'", pattern))?;
+                    let path = entry.path();
+                    if path == workspace_root {
+                        continue;
+                    }
+                    let rel = path
+                        .strip_prefix(workspace_root)
+                        .with_context(|| {
+                            format!(
+                                "input path '{}' escaped workspace root '{}'",
+                                path.display(),
+                                workspace_root.display()
+                            )
+                        })?
+                        .to_path_buf();
+                    if matcher.matches_path(&rel) {
+                        resolved.insert(rel);
+                        found = true;
+                    }
                 }
+            } else {
+                let absolute_pattern = workspace_root.join(pattern);
+                let pattern_text = absolute_pattern
+                    .to_str()
+                    .ok_or_else(|| anyhow!("non UTF-8 input pattern '{}'", pattern))?;
+                for entry in glob::glob(pattern_text)
+                    .with_context(|| format!("resolving input glob '{}'", pattern))?
+                {
+                    let path =
+                        entry.with_context(|| format!("expanding input glob '{}'", pattern))?;
+                    if !path.exists() {
+                        continue;
+                    }
 
-                let rel = path
-                    .strip_prefix(workspace_root)
-                    .with_context(|| {
-                        format!(
-                            "input path '{}' escaped workspace root '{}'",
-                            path.display(),
-                            workspace_root.display()
-                        )
-                    })?
-                    .to_path_buf();
-                resolved.insert(rel);
-                found = true;
+                    let rel = path
+                        .strip_prefix(workspace_root)
+                        .with_context(|| {
+                            format!(
+                                "input path '{}' escaped workspace root '{}'",
+                                path.display(),
+                                workspace_root.display()
+                            )
+                        })?
+                        .to_path_buf();
+                    resolved.insert(rel);
+                    found = true;
+                }
             }
 
             if !found {

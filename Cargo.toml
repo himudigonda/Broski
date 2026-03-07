@@ -20,6 +20,7 @@ anyhow = "1.0"
 blake3 = "1.8"
 clap = { version = "4.5", features = ["derive"] }
 glob = "0.3"
+ignore = "0.4"
 indicatif = "0.17"
 libc = "0.2"
 miette = { version = "7.2", features = ["fancy"] }
