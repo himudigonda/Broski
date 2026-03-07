@@ -77,16 +77,6 @@ Pinned install:
 curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.6.1 bash
 ```
 
-## Benchmark Snapshot (TaskPulse, March 7, 2026)
-
-Measured on `/Users/himudigonda/Desktop/test` with fresh binaries (`v0.5.2` baseline vs `0.6.0` candidate):
-
-- `cold_ci`: `10.79s -> 2.84s` (`-73.69%`)
-- `content_change_backend`: `3.58s -> 0.50s` (`-85.92%`)
-- `content_change_frontend`: `5.49s -> 2.34s` (`-57.30%`)
-
-Transparency note: tiny cached invocations (`warm_ci`, `dry_run_ci`, `cache_explain_hit`) are slightly slower in absolute terms (~`0.02s` vs `~0.015s`) but remain sub-`0.03s`.
-
 ## Docs Portal
 
 - Public docs: [https://himudigonda.me/broski_docs/](https://himudigonda.me/broski_docs/)
