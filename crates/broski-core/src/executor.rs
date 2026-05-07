@@ -25,7 +25,7 @@ use crate::fingerprint::{compute_fingerprint, FingerprintOptions};
 use crate::graph::TaskGraph;
 use crate::model::{BroskiFile, IsolationMode, TaskMode, TaskSpec};
 use crate::resolver::{normalize_relative_path, resolve_inputs};
-use crate::runtime::{acquire_runtime_lock, sweep_runtime_state, RuntimeLockGuard};
+use crate::runtime::{acquire_runtime_lock, sweep_runtime_state};
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -109,7 +109,6 @@ pub struct Executor {
     store: Arc<dyn ArtifactStore>,
     loaded_env: BTreeMap<String, String>,
     fingerprint_key: [u8; 32],
-    _lock_guard: RuntimeLockGuard,
 }
 
 impl Executor {
@@ -120,11 +119,6 @@ impl Executor {
     ) -> Result<Self> {
         let workspace_root = workspace_root.as_ref().to_path_buf();
         let loaded_env = load_env_files(&workspace_root, &config.load_env)?;
-        let sweep = sweep_runtime_state(&workspace_root, true)?;
-        if sweep.active_lock_detected {
-            return Err(anyhow!("another Broski execution is active; aborting startup sweep"));
-        }
-        let lock_guard = acquire_runtime_lock(&workspace_root)?;
         let graph = TaskGraph::build(&config.task)?;
         let fingerprint_key = load_or_create_fingerprint_key(&workspace_root)?;
 
@@ -135,7 +129,6 @@ impl Executor {
             store,
             loaded_env,
             fingerprint_key,
-            _lock_guard: lock_guard,
         })
     }
 
@@ -165,6 +158,29 @@ impl Executor {
         let resolved_target = self.config.resolve_task_name(target)?;
         let layers = self.graph.layers_for_target(&resolved_target)?;
         self.preflight_requires(&layers)?;
+
+        // Interactive-only runs (servers, dev processes) never write to the cache,
+        // stage, or tx dirs — so they don't need the workspace lock and can run
+        // concurrently with other broski invocations (e.g. two terminals).
+        // Graph-mode tasks do write shared state, so they lock exclusively.
+        let needs_lock = layers.iter().flatten().any(|task_name| {
+            self.config
+                .task
+                .get(task_name)
+                .map_or(true, |t| t.inferred_mode() != TaskMode::Interactive)
+        });
+        let _run_lock = if needs_lock {
+            let sweep = sweep_runtime_state(&self.workspace_root, true)?;
+            if sweep.active_lock_detected {
+                return Err(anyhow!(
+                    "another Broski execution is active; aborting startup sweep"
+                ));
+            }
+            Some(acquire_runtime_lock(&self.workspace_root)?)
+        } else {
+            None
+        };
+
         let mut summary = RunSummary::default();
         let progress_enabled = io::stderr().is_terminal();
         let mut renderer: Option<thread::JoinHandle<()>> = None;
@@ -222,10 +238,33 @@ impl Executor {
                 apply_outcome(&mut summary, outcome);
             }
 
-            for task_name in interactive_tasks {
-                let outcome =
-                    self.execute_task(&task_name, options, progress_sender.as_ref().cloned())?;
+            if interactive_tasks.len() == 1 {
+                let outcome = self.execute_task(
+                    &interactive_tasks[0],
+                    options,
+                    progress_sender.as_ref().cloned(),
+                )?;
                 apply_outcome(&mut summary, outcome);
+            } else if !interactive_tasks.is_empty() {
+                let results: Vec<Result<TaskOutcome>> = thread::scope(|s| {
+                    interactive_tasks
+                        .iter()
+                        .map(|task_name| {
+                            let sender = progress_sender.as_ref().cloned();
+                            s.spawn(move || self.execute_task(task_name, options, sender))
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|h| {
+                            h.join().unwrap_or_else(|_| {
+                                Err(anyhow!("interactive task thread panicked"))
+                            })
+                        })
+                        .collect()
+                });
+                for outcome in results {
+                    apply_outcome(&mut summary, outcome?);
+                }
             }
         }
 
@@ -2321,5 +2360,100 @@ mod tests {
         let result = executor
             .run_target("build", &RunOptions { force_isolation: true, ..RunOptions::default() });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn concurrent_interactive_tasks_both_run() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let marker_a = workspace.join("ran_a.txt");
+        let marker_b = workspace.join("ran_b.txt");
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "task_a".to_string(),
+            TaskSpec {
+                deps: vec![],
+                description: None,
+                resolved_variables: BTreeMap::new(),
+                inputs: vec![],
+                stage_ro: vec![],
+                outputs: vec![],
+                env: BTreeMap::new(),
+                env_inherit: Vec::new(),
+                secret_env: Vec::new(),
+                run: RunSpec::Shell(format!("touch {}", marker_a.display())),
+                isolation: Some(IsolationMode::Off),
+                mode: Some(TaskMode::Interactive),
+                working_dir: None,
+                params: Vec::new(),
+                private: false,
+                confirm: None,
+                shell_override: None,
+                requires: Vec::new(),
+            },
+        );
+        tasks.insert(
+            "task_b".to_string(),
+            TaskSpec {
+                deps: vec![],
+                description: None,
+                resolved_variables: BTreeMap::new(),
+                inputs: vec![],
+                stage_ro: vec![],
+                outputs: vec![],
+                env: BTreeMap::new(),
+                env_inherit: Vec::new(),
+                secret_env: Vec::new(),
+                run: RunSpec::Shell(format!("touch {}", marker_b.display())),
+                isolation: Some(IsolationMode::Off),
+                mode: Some(TaskMode::Interactive),
+                working_dir: None,
+                params: Vec::new(),
+                private: false,
+                confirm: None,
+                shell_override: None,
+                requires: Vec::new(),
+            },
+        );
+        tasks.insert(
+            "dev".to_string(),
+            TaskSpec {
+                deps: vec!["task_a".to_string(), "task_b".to_string()],
+                description: None,
+                resolved_variables: BTreeMap::new(),
+                inputs: vec![],
+                stage_ro: vec![],
+                outputs: vec![],
+                env: BTreeMap::new(),
+                env_inherit: Vec::new(),
+                secret_env: Vec::new(),
+                run: RunSpec::Shell("true".to_string()),
+                isolation: Some(IsolationMode::Off),
+                mode: Some(TaskMode::Interactive),
+                working_dir: None,
+                params: Vec::new(),
+                private: false,
+                confirm: None,
+                shell_override: None,
+                requires: Vec::new(),
+            },
+        );
+
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("create cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
+
+        executor.run_target("dev", &RunOptions::default()).expect("dev task should succeed");
+
+        assert!(marker_a.exists(), "task_a marker should exist");
+        assert!(marker_b.exists(), "task_b marker should exist");
     }
 }
