@@ -581,7 +581,9 @@ impl Executor {
 
         let started_resolve_inputs = Instant::now();
         let inputs = resolve_inputs(&self.workspace_root, &task.inputs)?;
-        timings.resolve_inputs = Some(started_resolve_inputs.elapsed());
+        let elapsed_resolve_inputs = started_resolve_inputs.elapsed();
+        timings.resolve_inputs = Some(elapsed_resolve_inputs);
+        emit_phase(&progress, task_name, TaskPhase::ResolveInputs, elapsed_resolve_inputs);
 
         let started_fingerprint = Instant::now();
         let fingerprint_result = compute_fingerprint(
@@ -596,7 +598,9 @@ impl Executor {
                 secret_env_key: &self.fingerprint_key,
             },
         )?;
-        timings.fingerprint = Some(started_fingerprint.elapsed());
+        let elapsed_fingerprint = started_fingerprint.elapsed();
+        timings.fingerprint = Some(elapsed_fingerprint);
+        emit_phase(&progress, task_name, TaskPhase::Fingerprint, elapsed_fingerprint);
         let mut cache_miss_reasons = Vec::new();
 
         if !options.force && !options.no_cache {
@@ -627,7 +631,9 @@ impl Executor {
                 self.store
                     .restore_artifacts(&self.workspace_root, &record.artifacts)
                     .with_context(|| format!("restoring cache hit for task '{}'", task_name))?;
-                timings.cache_restore = Some(started_restore.elapsed());
+                let elapsed_restore = started_restore.elapsed();
+                timings.cache_restore = Some(elapsed_restore);
+                emit_phase(&progress, task_name, TaskPhase::CacheRestore, elapsed_restore);
 
                 if show_progress {
                     emit_progress(
@@ -676,7 +682,9 @@ impl Executor {
 
         let started_stage = Instant::now();
         let stage = self.create_stage_snapshot(task_name, &inputs, &stage_ro)?;
-        timings.stage_prep = Some(started_stage.elapsed());
+        let elapsed_stage = started_stage.elapsed();
+        timings.stage_prep = Some(elapsed_stage);
+        emit_phase(&progress, task_name, TaskPhase::StagePrep, elapsed_stage);
 
         let started_command = Instant::now();
         let output = self
@@ -689,7 +697,9 @@ impl Executor {
                 options,
             )
             .with_context(|| format!("executing task '{}'", task_name))?;
-        timings.command_exec = Some(started_command.elapsed());
+        let elapsed_command = started_command.elapsed();
+        timings.command_exec = Some(elapsed_command);
+        emit_phase(&progress, task_name, TaskPhase::CommandExec, elapsed_command);
         let output = redact_output(output, redactor.as_ref());
 
         if !output.status.success() {
@@ -718,12 +728,16 @@ impl Executor {
         let started_promote = Instant::now();
         self.promote_outputs(stage.path(), &outputs)
             .with_context(|| format!("promoting outputs for task '{}'", task_name))?;
-        timings.output_promote = Some(started_promote.elapsed());
+        let elapsed_promote = started_promote.elapsed();
+        timings.output_promote = Some(elapsed_promote);
+        emit_phase(&progress, task_name, TaskPhase::OutputPromote, elapsed_promote);
 
         if !options.no_cache {
             let started_store = Instant::now();
             let artifacts = self.store.store_artifacts(&self.workspace_root, &outputs)?;
-            timings.cache_store = Some(started_store.elapsed());
+            let elapsed_store = started_store.elapsed();
+            timings.cache_store = Some(elapsed_store);
+            emit_phase(&progress, task_name, TaskPhase::CacheStore, elapsed_store);
             let record = ExecutionRecord {
                 task_name: task_name.to_string(),
                 fingerprint: fingerprint_result.fingerprint.0,
@@ -1143,6 +1157,18 @@ fn emit_progress(sender: &Option<Sender<ProgressEvent>>, event: ProgressEvent) {
     if let Some(tx) = sender {
         let _ = tx.send(event);
     }
+}
+
+fn emit_phase(
+    sender: &Option<Sender<ProgressEvent>>,
+    task_name: &str,
+    phase: TaskPhase,
+    elapsed: Duration,
+) {
+    emit_progress(
+        sender,
+        ProgressEvent::TaskPhase { task: task_name.to_string(), phase, elapsed },
+    );
 }
 
 fn run_progress_renderer(receiver: mpsc::Receiver<ProgressEvent>) {
@@ -2585,6 +2611,127 @@ mod tests {
 
         assert!(marker_a.exists(), "task_a marker should exist");
         assert!(marker_b.exists(), "task_b marker should exist");
+    }
+
+    fn collect_events(rx: mpsc::Receiver<ProgressEvent>) -> Vec<ProgressEvent> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.recv_timeout(Duration::from_millis(500)) {
+            out.push(ev);
+        }
+        out
+    }
+
+    fn build_graph_workspace(
+        cmd: &str,
+    ) -> (tempfile::TempDir, BroskiFile, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("src");
+        let mut input = fs::File::create(workspace.join("src/input.txt")).expect("input");
+        input.write_all(b"hello").expect("write input");
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert("phase_task".to_string(), simple_task(cmd));
+
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+        (tmp, config, workspace)
+    }
+
+    #[test]
+    fn streaming_emits_phase_events_for_graph_task() {
+        let (_tmp, config, workspace) =
+            build_graph_workspace("mkdir -p dist && echo ok > dist/output.txt");
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let (tx, rx) = mpsc::channel::<ProgressEvent>();
+        let opts = RunOptions { event_sink: Some(tx), ..RunOptions::default() };
+        executor.run_target("phase_task", &opts).expect("run ok");
+        drop(opts);
+
+        let events = collect_events(rx);
+        let phases: Vec<TaskPhase> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                ProgressEvent::TaskPhase { phase, .. } => Some(*phase),
+                _ => None,
+            })
+            .collect();
+        // Must observe at least these graph-mode phases:
+        assert!(phases.contains(&TaskPhase::ResolveInputs));
+        assert!(phases.contains(&TaskPhase::Fingerprint));
+        assert!(phases.contains(&TaskPhase::StagePrep));
+        assert!(phases.contains(&TaskPhase::CommandExec));
+        assert!(phases.contains(&TaskPhase::OutputPromote));
+        assert!(phases.contains(&TaskPhase::CacheStore));
+
+        let finished = events
+            .iter()
+            .find_map(|ev| match ev {
+                ProgressEvent::TaskFinished { status, error, .. } => Some((*status, error.clone())),
+                _ => None,
+            })
+            .expect("TaskFinished present");
+        assert_eq!(finished.0, TaskStatus::Executed);
+        assert!(finished.1.is_none());
+    }
+
+    #[test]
+    fn streaming_emits_cache_hit_status_on_replay() {
+        let (_tmp, config, workspace) =
+            build_graph_workspace("mkdir -p dist && echo ok > dist/output.txt");
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        // Prime the cache.
+        executor.run_target("phase_task", &RunOptions::default()).expect("first run");
+
+        // Second run with a sink should observe a CacheHit.
+        let (tx, rx) = mpsc::channel::<ProgressEvent>();
+        let opts = RunOptions { event_sink: Some(tx), ..RunOptions::default() };
+        executor.run_target("phase_task", &opts).expect("second run");
+        drop(opts);
+
+        let events = collect_events(rx);
+        let status = events
+            .iter()
+            .find_map(|ev| match ev {
+                ProgressEvent::TaskFinished { status, .. } => Some(*status),
+                _ => None,
+            })
+            .expect("TaskFinished present");
+        assert_eq!(status, TaskStatus::CacheHit);
+    }
+
+    #[test]
+    fn streaming_emits_failed_with_error_on_command_failure() {
+        let (_tmp, config, workspace) = build_graph_workspace(
+            "mkdir -p dist && echo bad > dist/output.txt && echo MARKER_STDERR 1>&2 && exit 7",
+        );
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let (tx, rx) = mpsc::channel::<ProgressEvent>();
+        let opts = RunOptions { event_sink: Some(tx), ..RunOptions::default() };
+        let _ = executor.run_target("phase_task", &opts);
+        drop(opts);
+
+        let events = collect_events(rx);
+        let (status, error) = events
+            .iter()
+            .find_map(|ev| match ev {
+                ProgressEvent::TaskFinished { status, error, .. } => Some((*status, error.clone())),
+                _ => None,
+            })
+            .expect("TaskFinished present");
+        assert_eq!(status, TaskStatus::Failed);
+        let msg = error.expect("error string on failure");
+        assert!(msg.contains("MARKER_STDERR"), "expected stderr tail in error, got: {}", msg);
     }
 
     #[test]
