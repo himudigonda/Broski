@@ -9,7 +9,9 @@ pub mod runtime;
 pub mod validator;
 
 pub use config::{load_broskifile, parse_broskifile_with_mode, ParserMode};
-pub use executor::{Executor, RunOptions, RunSummary};
+pub use executor::{
+    Executor, LogStream, ProgressEvent, RunOptions, RunSummary, TaskPhase, TaskStatus,
+};
 pub use fingerprint::{compute_fingerprint, FingerprintResult, TaskFingerprint};
 pub use graph::TaskGraph;
 pub use model::{BroskiFile, IsolationMode, RunSpec, TaskMode, TaskSpec};

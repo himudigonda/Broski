@@ -81,18 +81,68 @@ struct TaskPhaseTimings {
     cache_store: Option<Duration>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum TaskProgressStatus {
+/// Terminal status of a task within a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    /// The task ran to completion successfully.
     Executed,
+    /// The cached artifacts were restored without re-running the command.
     CacheHit,
+    /// `--dry-run` was set; the task was inspected but not executed.
     DryRun,
+    /// The command exited non-zero. `error` on the corresponding event holds the captured stderr tail.
     Failed,
+    /// The task was skipped (e.g. dependency failed under `--keep-going` in a future iteration).
+    Skipped,
 }
 
+/// Internal phase boundaries observed within `execute_task`.
+///
+/// Emitted as `ProgressEvent::TaskPhase` so renderers (TUI / log) can show
+/// per-phase timing without re-deriving them from raw output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPhase {
+    ResolveInputs,
+    Fingerprint,
+    CacheRestore,
+    StagePrep,
+    CommandExec,
+    OutputPromote,
+    CacheStore,
+}
+
+/// Output stream a captured log line came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogStream {
+    Stdout,
+    Stderr,
+}
+
+/// Structured progress event emitted by the executor during a run.
+///
+/// Renderers (the built-in indicatif spinner, the upcoming TUI, custom log
+/// adapters) consume this stream via [`RunOptions::event_sink`].
 #[derive(Debug, Clone)]
-enum ProgressEvent {
-    TaskStarted(String),
-    TaskFinished(String, TaskProgressStatus),
+pub enum ProgressEvent {
+    /// First event of every run. Carries the resolved target and topo layers.
+    RunStarted { target: String, layers: Vec<Vec<String>> },
+    /// Emitted before a task starts so renderers can mark it queued.
+    TaskQueued { task: String },
+    /// The task has begun execution (or cache lookup) on a worker.
+    TaskStarted { task: String, mode: TaskMode },
+    /// A phase boundary was crossed. `elapsed` is the wall-clock duration of that phase only.
+    TaskPhase { task: String, phase: TaskPhase, elapsed: Duration },
+    /// A captured stdout/stderr line. Only emitted when `RunOptions::capture_output` is true.
+    LogLine { task: String, stream: LogStream, line: String },
+    /// Terminal event for a task. `duration` is sum-of-observed-phases.
+    TaskFinished {
+        task: String,
+        status: TaskStatus,
+        duration: Duration,
+        error: Option<String>,
+    },
+    /// Last event of every run.
+    RunFinished,
 }
 
 #[derive(Debug, Clone)]
@@ -429,7 +479,10 @@ impl Executor {
         }
         let show_progress = task_mode != TaskMode::Interactive;
         if show_progress {
-            emit_progress(&progress, ProgressEvent::TaskStarted(task_name.to_string()));
+            emit_progress(
+                &progress,
+                ProgressEvent::TaskStarted { task: task_name.to_string(), mode: task_mode },
+            );
         }
         let (resolved_env, secret_env_keys) = self.resolve_task_env(&task)?;
         let redactor = SecretRedactor::from_env(&resolved_env, &secret_env_keys);
@@ -446,10 +499,12 @@ impl Executor {
                 if show_progress {
                     emit_progress(
                         &progress,
-                        ProgressEvent::TaskFinished(
-                            task_name.to_string(),
-                            TaskProgressStatus::DryRun,
-                        ),
+                        ProgressEvent::TaskFinished {
+                            task: task_name.to_string(),
+                            status: TaskStatus::DryRun,
+                            duration: Duration::ZERO,
+                            error: None,
+                        },
                     );
                 }
                 return Ok(TaskOutcome {
@@ -464,6 +519,7 @@ impl Executor {
                 });
             }
 
+            let started_interactive = Instant::now();
             self.run_interactive_command(
                 task_name,
                 &task,
@@ -475,10 +531,12 @@ impl Executor {
             if show_progress {
                 emit_progress(
                     &progress,
-                    ProgressEvent::TaskFinished(
-                        task_name.to_string(),
-                        TaskProgressStatus::Executed,
-                    ),
+                    ProgressEvent::TaskFinished {
+                        task: task_name.to_string(),
+                        status: TaskStatus::Executed,
+                        duration: started_interactive.elapsed(),
+                        error: None,
+                    },
                 );
             }
             return Ok(TaskOutcome {
@@ -526,10 +584,12 @@ impl Executor {
                     if show_progress {
                         emit_progress(
                             &progress,
-                            ProgressEvent::TaskFinished(
-                                task_name.to_string(),
-                                TaskProgressStatus::DryRun,
-                            ),
+                            ProgressEvent::TaskFinished {
+                                task: task_name.to_string(),
+                                status: TaskStatus::DryRun,
+                                duration: task_total_duration(&timings),
+                                error: None,
+                            },
                         );
                     }
                     return Ok(TaskOutcome {
@@ -549,10 +609,12 @@ impl Executor {
                 if show_progress {
                     emit_progress(
                         &progress,
-                        ProgressEvent::TaskFinished(
-                            task_name.to_string(),
-                            TaskProgressStatus::CacheHit,
-                        ),
+                        ProgressEvent::TaskFinished {
+                            task: task_name.to_string(),
+                            status: TaskStatus::CacheHit,
+                            duration: task_total_duration(&timings),
+                            error: None,
+                        },
                     );
                 }
                 return Ok(TaskOutcome {
@@ -573,7 +635,12 @@ impl Executor {
             if show_progress {
                 emit_progress(
                     &progress,
-                    ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::DryRun),
+                    ProgressEvent::TaskFinished {
+                        task: task_name.to_string(),
+                        status: TaskStatus::DryRun,
+                        duration: task_total_duration(&timings),
+                        error: None,
+                    },
                 );
             }
             return Ok(TaskOutcome {
@@ -603,14 +670,19 @@ impl Executor {
         let output = redact_output(output, redactor.as_ref());
 
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             if show_progress {
                 emit_progress(
                     &progress,
-                    ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Failed),
+                    ProgressEvent::TaskFinished {
+                        task: task_name.to_string(),
+                        status: TaskStatus::Failed,
+                        duration: task_total_duration(&timings),
+                        error: Some(stderr_tail(&stderr)),
+                    },
                 );
             }
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             return Err(anyhow!(
                 "task '{}' failed with status {}\nstdout:\n{}\nstderr:\n{}",
                 task_name,
@@ -644,7 +716,12 @@ impl Executor {
         if show_progress {
             emit_progress(
                 &progress,
-                ProgressEvent::TaskFinished(task_name.to_string(), TaskProgressStatus::Executed),
+                ProgressEvent::TaskFinished {
+                    task: task_name.to_string(),
+                    status: TaskStatus::Executed,
+                    duration: task_total_duration(&timings),
+                    error: None,
+                },
             );
         }
         Ok(TaskOutcome {
@@ -1055,7 +1132,7 @@ fn run_progress_renderer(receiver: mpsc::Receiver<ProgressEvent>) {
 
     while let Ok(event) = receiver.recv() {
         match event {
-            ProgressEvent::TaskStarted(task) => {
+            ProgressEvent::TaskStarted { task, .. } => {
                 let bar = bars.entry(task.clone()).or_insert_with(|| {
                     let pb = multi.add(ProgressBar::new_spinner());
                     pb.set_style(style.clone());
@@ -1064,26 +1141,56 @@ fn run_progress_renderer(receiver: mpsc::Receiver<ProgressEvent>) {
                 });
                 bar.set_message(format!("{task} running"));
             }
-            ProgressEvent::TaskFinished(task, status) => {
+            ProgressEvent::TaskFinished { task, status, .. } => {
                 if let Some(bar) = bars.remove(&task) {
                     match status {
-                        TaskProgressStatus::Executed => {
+                        TaskStatus::Executed
+                        | TaskStatus::CacheHit
+                        | TaskStatus::DryRun
+                        | TaskStatus::Skipped => {
                             bar.finish_and_clear();
                         }
-                        TaskProgressStatus::CacheHit => {
-                            bar.finish_and_clear();
-                        }
-                        TaskProgressStatus::DryRun => {
-                            bar.finish_and_clear();
-                        }
-                        TaskProgressStatus::Failed => {
+                        TaskStatus::Failed => {
                             bar.finish_with_message(format!("{task} failed"));
                         }
                     }
                 }
             }
+            // Other events (RunStarted, TaskQueued, TaskPhase, LogLine, RunFinished)
+            // are informational only and don't affect the indicatif spinner UI.
+            _ => {}
         }
     }
+}
+
+fn task_total_duration(timings: &TaskPhaseTimings) -> Duration {
+    [
+        timings.resolve_inputs,
+        timings.fingerprint,
+        timings.cache_restore,
+        timings.stage_prep,
+        timings.command_exec,
+        timings.output_promote,
+        timings.cache_store,
+    ]
+    .into_iter()
+    .flatten()
+    .sum()
+}
+
+const STDERR_TAIL_BYTES: usize = 2048;
+
+fn stderr_tail(stderr: &str) -> String {
+    if stderr.len() <= STDERR_TAIL_BYTES {
+        return stderr.trim_end().to_string();
+    }
+    let start = stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+    let mut adjusted_start = start;
+    while adjusted_start < stderr.len() && !stderr.is_char_boundary(adjusted_start) {
+        adjusted_start += 1;
+    }
+    let suffix = &stderr[adjusted_start..];
+    format!("…{}", suffix.trim_end())
 }
 
 fn selected_isolation(task: &TaskSpec, options: &RunOptions) -> IsolationMode {
