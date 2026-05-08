@@ -37,6 +37,14 @@ pub struct RunOptions {
     pub force_isolation: bool,
     pub jobs: usize,
     pub passthrough_args: Vec<String>,
+    /// External sink for live progress events. When `Some`, the executor emits
+    /// to this channel instead of spawning the built-in indicatif renderer.
+    /// Defaults to `None` so the CLI's spinner output is preserved.
+    pub event_sink: Option<Sender<ProgressEvent>>,
+    /// When true (and `event_sink` is `Some`), capture child stdout/stderr
+    /// line-by-line and emit each line as `ProgressEvent::LogLine`. Defaults
+    /// to `false`; the CLI keeps `Stdio::inherit` behavior.
+    pub capture_output: bool,
 }
 
 impl Default for RunOptions {
@@ -50,6 +58,8 @@ impl Default for RunOptions {
             force_isolation: false,
             jobs: num_cpus::get().max(1),
             passthrough_args: Vec::new(),
+            event_sink: None,
+            capture_output: false,
         }
     }
 }
@@ -232,15 +242,21 @@ impl Executor {
         };
 
         let mut summary = RunSummary::default();
-        let progress_enabled = io::stderr().is_terminal();
         let mut renderer: Option<thread::JoinHandle<()>> = None;
-        let mut progress_sender: Option<Sender<ProgressEvent>> = None;
+        let mut progress_sender: Option<Sender<ProgressEvent>> = match &options.event_sink {
+            Some(external) => Some(external.clone()),
+            None if io::stderr().is_terminal() => {
+                let (tx, rx) = mpsc::channel::<ProgressEvent>();
+                renderer = Some(thread::spawn(move || run_progress_renderer(rx)));
+                Some(tx)
+            }
+            None => None,
+        };
 
-        if progress_enabled {
-            let (tx, rx) = mpsc::channel::<ProgressEvent>();
-            progress_sender = Some(tx);
-            renderer = Some(thread::spawn(move || run_progress_renderer(rx)));
-        }
+        emit_progress(
+            &progress_sender,
+            ProgressEvent::RunStarted { target: resolved_target.clone(), layers: layers.clone() },
+        );
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(options.jobs.max(1))
@@ -258,6 +274,10 @@ impl Executor {
                     .task
                     .get(&task_name)
                     .ok_or_else(|| anyhow!("task '{}' not found", task_name))?;
+                emit_progress(
+                    &progress_sender,
+                    ProgressEvent::TaskQueued { task: task_name.clone() },
+                );
                 if task.inferred_mode() == TaskMode::Interactive {
                     interactive_tasks.push(task_name);
                 } else {
@@ -278,6 +298,7 @@ impl Executor {
                 let outcome = match outcome {
                     Ok(value) => value,
                     Err(error) => {
+                        emit_progress(&progress_sender, ProgressEvent::RunFinished);
                         drop(progress_sender.take());
                         if let Some(handle) = renderer.take() {
                             let _ = handle.join();
@@ -317,6 +338,8 @@ impl Executor {
                 }
             }
         }
+
+        emit_progress(&progress_sender, ProgressEvent::RunFinished);
 
         drop(progress_sender.take());
         if let Some(handle) = renderer.take() {
@@ -2562,5 +2585,70 @@ mod tests {
 
         assert!(marker_a.exists(), "task_a marker should exist");
         assert!(marker_b.exists(), "task_b marker should exist");
+    }
+
+    #[test]
+    fn cli_default_options_have_no_sink() {
+        let opts = RunOptions::default();
+        assert!(opts.event_sink.is_none());
+        assert!(!opts.capture_output);
+    }
+
+    #[test]
+    fn streaming_emits_run_lifecycle_for_simple_task() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let marker = workspace.join("ran.txt");
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "solo".to_string(),
+            TaskSpec {
+                deps: vec![],
+                description: None,
+                resolved_variables: BTreeMap::new(),
+                inputs: vec![],
+                stage_ro: vec![],
+                outputs: vec![],
+                env: BTreeMap::new(),
+                env_inherit: Vec::new(),
+                secret_env: Vec::new(),
+                run: RunSpec::Shell(format!("touch {}", marker.display())),
+                isolation: Some(IsolationMode::Off),
+                mode: Some(TaskMode::Interactive),
+                working_dir: None,
+                params: Vec::new(),
+                private: false,
+                confirm: None,
+                shell_override: None,
+                requires: Vec::new(),
+            },
+        );
+
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let (tx, rx) = mpsc::channel::<ProgressEvent>();
+        let opts =
+            RunOptions { event_sink: Some(tx), ..RunOptions::default() };
+        executor.run_target("solo", &opts).expect("solo runs");
+        // Drop the executor's clone of the sender by dropping opts (it's our last reference here).
+        drop(opts);
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.recv_timeout(Duration::from_millis(500)) {
+            events.push(ev);
+        }
+        assert!(!events.is_empty(), "expected at least one event");
+        assert!(matches!(events.first(), Some(ProgressEvent::RunStarted { .. })));
+        assert!(matches!(events.last(), Some(ProgressEvent::RunFinished)));
     }
 }
