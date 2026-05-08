@@ -16,6 +16,7 @@ which.workspace = true
 broski-cache = { path = "../broski-cache" }
 broski-core = { path = "../broski-core" }
 broski-store = { path = "../broski-store" }
+broski-tui = { path = "../broski-tui" }
 
 [dev-dependencies]
 tempfile.workspace = true

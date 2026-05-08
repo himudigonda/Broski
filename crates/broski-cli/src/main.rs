@@ -60,6 +60,20 @@ enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
+    /// Launch the live ratatui dashboard for a task.
+    Tui {
+        task: String,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        no_cache: bool,
+        #[arg(long)]
+        force_isolation: bool,
+        #[arg(long)]
+        jobs: Option<usize>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     #[command(external_subcommand)]
     Task(Vec<String>),
 }
@@ -195,6 +209,34 @@ fn run() -> Result<()> {
                 }
             }
 
+            Ok(())
+        }
+        Some(Command::Tui { task, force, no_cache, force_isolation, jobs, args }) => {
+            let config = load_and_validate(&workspace)?;
+            let cache = LocalArtifactStore::new(cache_root(&workspace))?;
+            let mut options = RunOptions {
+                force,
+                no_cache,
+                force_isolation,
+                passthrough_args: args,
+                ..RunOptions::default()
+            };
+            if let Some(j) = jobs {
+                options.jobs = j.max(1);
+            }
+            let summary = broski_tui::run(
+                workspace.clone(),
+                config,
+                Arc::new(cache),
+                task,
+                options,
+            )?;
+            if !summary.cache_hits.is_empty() {
+                println!("cache hits: {}", summary.cache_hits.join(", "));
+            }
+            if !summary.executed.is_empty() {
+                println!("executed: {}", summary.executed.join(", "));
+            }
             Ok(())
         }
         Some(Command::Task(raw)) => {
