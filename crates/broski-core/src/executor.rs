@@ -695,6 +695,7 @@ impl Executor {
                 &resolved_env,
                 &passthrough_args,
                 options,
+                progress.as_ref(),
             )
             .with_context(|| format!("executing task '{}'", task_name))?;
         let elapsed_command = started_command.elapsed();
@@ -819,14 +820,16 @@ impl Executor {
         Ok(stage)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_task_command(
         &self,
-        _task_name: &str,
+        task_name: &str,
         task: &TaskSpec,
         stage_workspace: &Path,
         resolved_env: &BTreeMap<String, String>,
         passthrough_args: &[String],
         options: &RunOptions,
+        progress: Option<&Sender<ProgressEvent>>,
     ) -> Result<Output> {
         let isolation_mode = selected_isolation(task, options);
         let invocation = prepare_task_invocation(stage_workspace, task, passthrough_args)?;
@@ -875,9 +878,45 @@ impl Executor {
             command.env(key, value);
         }
 
-        command
-            .output()
-            .with_context(|| format!("spawning task command '{}'", invocation.display_command))
+        let capture = options.capture_output && options.event_sink.is_some();
+        if !capture {
+            return command.output().with_context(|| {
+                format!("spawning task command '{}'", invocation.display_command)
+            });
+        }
+
+        // Capture mode: pipe stdout/stderr line-by-line so LogLine events can stream
+        // to the caller's sink while the command is still running. The synthesized
+        // Output preserves the existing return contract (status + raw bytes).
+        let sender = progress
+            .cloned()
+            .ok_or_else(|| anyhow!("capture_output requires an event_sink"))?;
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().with_context(|| {
+            format!("spawning task command '{}'", invocation.display_command)
+        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("captured stdout was not opened for task '{}'", task_name))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("captured stderr was not opened for task '{}'", task_name))?;
+        let stdout_handle =
+            spawn_log_capture(stdout, task_name.to_string(), LogStream::Stdout, sender.clone());
+        let stderr_handle =
+            spawn_log_capture(stderr, task_name.to_string(), LogStream::Stderr, sender);
+        let status = child.wait().with_context(|| {
+            format!("waiting on task command '{}'", invocation.display_command)
+        })?;
+        let stdout_bytes = stdout_handle
+            .join()
+            .map_err(|_| anyhow!("stdout capture thread panicked"))??;
+        let stderr_bytes = stderr_handle
+            .join()
+            .map_err(|_| anyhow!("stderr capture thread panicked"))??;
+        Ok(Output { status, stdout: stdout_bytes, stderr: stderr_bytes })
     }
 
     fn run_interactive_command(
@@ -1169,6 +1208,38 @@ fn emit_phase(
         sender,
         ProgressEvent::TaskPhase { task: task_name.to_string(), phase, elapsed },
     );
+}
+
+/// Read a child stdio handle line-by-line, emitting each line as a `LogLine`
+/// event. Returns the raw byte buffer of everything read so the caller can
+/// still construct an `Output` with the original semantics.
+fn spawn_log_capture<R>(
+    reader: R,
+    task: String,
+    stream: LogStream,
+    sender: Sender<ProgressEvent>,
+) -> thread::JoinHandle<Result<Vec<u8>>>
+where
+    R: io::Read + Send + 'static,
+{
+    thread::spawn(move || -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        let mut br = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = br
+                .read_line(&mut line)
+                .with_context(|| format!("reading {:?} for task '{}'", stream, task))?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(line.as_bytes());
+            let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
+            let _ = sender.send(ProgressEvent::LogLine { task: task.clone(), stream, line: trimmed });
+        }
+        Ok(buf)
+    })
 }
 
 fn run_progress_renderer(receiver: mpsc::Receiver<ProgressEvent>) {
@@ -2732,6 +2803,40 @@ mod tests {
         assert_eq!(status, TaskStatus::Failed);
         let msg = error.expect("error string on failure");
         assert!(msg.contains("MARKER_STDERR"), "expected stderr tail in error, got: {}", msg);
+    }
+
+    #[test]
+    fn streaming_capture_output_emits_loglines() {
+        let (_tmp, config, workspace) = build_graph_workspace(
+            "mkdir -p dist && echo MARKER_STDOUT && echo SIDE_STDERR 1>&2 && echo ok > dist/output.txt",
+        );
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let (tx, rx) = mpsc::channel::<ProgressEvent>();
+        let opts = RunOptions {
+            event_sink: Some(tx),
+            capture_output: true,
+            ..RunOptions::default()
+        };
+        executor.run_target("phase_task", &opts).expect("run ok");
+        drop(opts);
+
+        let events = collect_events(rx);
+        let saw_stdout = events.iter().any(|ev| match ev {
+            ProgressEvent::LogLine { stream: LogStream::Stdout, line, .. } => {
+                line.contains("MARKER_STDOUT")
+            }
+            _ => false,
+        });
+        let saw_stderr = events.iter().any(|ev| match ev {
+            ProgressEvent::LogLine { stream: LogStream::Stderr, line, .. } => {
+                line.contains("SIDE_STDERR")
+            }
+            _ => false,
+        });
+        assert!(saw_stdout, "stdout MARKER_STDOUT not seen as LogLine event");
+        assert!(saw_stderr, "stderr SIDE_STDERR not seen as LogLine event");
     }
 
     #[test]
