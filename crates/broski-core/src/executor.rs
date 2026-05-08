@@ -747,6 +747,9 @@ impl Executor {
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                 created_at: unix_timestamp_secs(),
+                duration_ms: task_total_duration(&timings)
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
             };
             self.store.save_execution(&record)?;
         }

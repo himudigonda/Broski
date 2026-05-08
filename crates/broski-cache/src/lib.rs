@@ -47,6 +47,7 @@ impl LocalArtifactStore {
                 stdout TEXT NOT NULL,
                 stderr TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(task_name, fingerprint)
             );
             CREATE INDEX IF NOT EXISTS idx_executions_task_created_at
@@ -55,6 +56,7 @@ impl LocalArtifactStore {
         )
         .context("initializing sqlite schema")?;
         ensure_manifest_column(&conn)?;
+        ensure_duration_column(&conn)?;
         Ok(())
     }
 
@@ -73,7 +75,7 @@ impl ArtifactStore for LocalArtifactStore {
         let conn = self.connection()?;
         let mut stmt = conn
             .prepare(
-                "SELECT manifest_json, artifacts_json, stdout, stderr, created_at
+                "SELECT manifest_json, artifacts_json, stdout, stderr, created_at, duration_ms
                 FROM executions WHERE task_name = ?1 AND fingerprint = ?2",
             )
             .context("preparing select execution statement")?;
@@ -91,6 +93,7 @@ impl ArtifactStore for LocalArtifactStore {
             let stdout: String = row.get(2).context("reading stdout")?;
             let stderr: String = row.get(3).context("reading stderr")?;
             let created_at: i64 = row.get(4).context("reading created_at")?;
+            let duration_ms: i64 = row.get(5).context("reading duration_ms")?;
             Ok(Some(ExecutionRecord {
                 task_name: task_name.to_owned(),
                 fingerprint: fingerprint.to_owned(),
@@ -99,6 +102,7 @@ impl ArtifactStore for LocalArtifactStore {
                 stdout,
                 stderr,
                 created_at,
+                duration_ms: duration_ms.max(0) as u64,
             }))
         } else {
             Ok(None)
@@ -109,7 +113,7 @@ impl ArtifactStore for LocalArtifactStore {
         let conn = self.connection()?;
         let mut stmt = conn
             .prepare(
-                "SELECT fingerprint, manifest_json, artifacts_json, stdout, stderr, created_at
+                "SELECT fingerprint, manifest_json, artifacts_json, stdout, stderr, created_at, duration_ms
                  FROM executions WHERE task_name = ?1
                  ORDER BY created_at DESC LIMIT 1",
             )
@@ -129,6 +133,7 @@ impl ArtifactStore for LocalArtifactStore {
             let stdout: String = row.get(3).context("reading latest stdout")?;
             let stderr: String = row.get(4).context("reading latest stderr")?;
             let created_at: i64 = row.get(5).context("reading latest created_at")?;
+            let duration_ms: i64 = row.get(6).context("reading latest duration_ms")?;
 
             Ok(Some(ExecutionRecord {
                 task_name: task_name.to_owned(),
@@ -138,6 +143,7 @@ impl ArtifactStore for LocalArtifactStore {
                 stdout,
                 stderr,
                 created_at,
+                duration_ms: duration_ms.max(0) as u64,
             }))
         } else {
             Ok(None)
@@ -150,10 +156,11 @@ impl ArtifactStore for LocalArtifactStore {
             .context("serializing manifest json for sqlite")?;
         let artifacts_json = serde_json::to_string(&record.artifacts)
             .context("serializing artifacts json for sqlite")?;
+        let duration_signed: i64 = record.duration_ms.try_into().unwrap_or(i64::MAX);
         conn.execute(
             "INSERT OR REPLACE INTO executions
-            (task_name, fingerprint, manifest_json, artifacts_json, stdout, stderr, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (task_name, fingerprint, manifest_json, artifacts_json, stdout, stderr, created_at, duration_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 record.task_name,
                 record.fingerprint,
@@ -162,6 +169,7 @@ impl ArtifactStore for LocalArtifactStore {
                 record.stdout,
                 record.stderr,
                 record.created_at,
+                duration_signed,
             ],
         )
         .context("writing execution record")?;
@@ -468,18 +476,7 @@ fn validate_object_hash(hash: &str) -> Result<()> {
 }
 
 fn ensure_manifest_column(conn: &Connection) -> Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(executions)").context("preparing table info")?;
-    let mut rows = stmt.query([]).context("querying table info")?;
-    let mut has_manifest = false;
-    while let Some(row) = rows.next().context("reading table info row")? {
-        let column_name: String = row.get(1).context("reading table info column name")?;
-        if column_name == "manifest_json" {
-            has_manifest = true;
-            break;
-        }
-    }
-
-    if !has_manifest {
+    if !column_exists(conn, "manifest_json")? {
         conn.execute(
             "ALTER TABLE executions ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '{}'",
             [],
@@ -487,6 +484,29 @@ fn ensure_manifest_column(conn: &Connection) -> Result<()> {
         .context("adding manifest_json column")?;
     }
     Ok(())
+}
+
+fn ensure_duration_column(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "duration_ms")? {
+        conn.execute(
+            "ALTER TABLE executions ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .context("adding duration_ms column")?;
+    }
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(executions)").context("preparing table info")?;
+    let mut rows = stmt.query([]).context("querying table info")?;
+    while let Some(row) = rows.next().context("reading table info row")? {
+        let column_name: String = row.get(1).context("reading table info column name")?;
+        if column_name == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -542,6 +562,7 @@ mod tests {
             stdout: "".to_string(),
             stderr: "".to_string(),
             created_at: 1,
+            duration_ms: 0,
         };
         store.save_execution(&existing).expect("save execution");
 
@@ -562,6 +583,7 @@ mod tests {
             stdout: "old".to_string(),
             stderr: "".to_string(),
             created_at: 10,
+            duration_ms: 1500,
         };
         let second = ExecutionRecord {
             task_name: "build".to_string(),
@@ -571,6 +593,7 @@ mod tests {
             stdout: "new".to_string(),
             stderr: "".to_string(),
             created_at: 20,
+            duration_ms: 2200,
         };
 
         store.save_execution(&first).expect("save first execution");
@@ -581,6 +604,7 @@ mod tests {
         assert_eq!(latest.fingerprint, "fp-2");
         assert_eq!(latest.stdout, "new");
         assert_eq!(latest.manifest.get("task:run"), Some(&"new".to_string()));
+        assert_eq!(latest.duration_ms, 2200);
     }
 
     #[test]
@@ -619,6 +643,65 @@ mod tests {
             .expect("fetch migrated row")
             .expect("row exists");
         assert!(fetched.manifest.is_empty());
+    }
+
+    #[test]
+    fn migrates_old_schema_with_missing_duration_column() {
+        // Schema as it existed before the duration_ms column landed: manifest
+        // is present (post-v0.5 migration) but duration_ms is not.
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let cache_root = tmp.path().join("cache");
+        fs::create_dir_all(&cache_root).expect("create cache root");
+        let db_path = cache_root.join("metadata.sqlite3");
+        let conn = Connection::open(&db_path).expect("open sqlite");
+        conn.execute_batch(
+            "
+            CREATE TABLE executions (
+                task_name TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                manifest_json TEXT NOT NULL DEFAULT '{}',
+                artifacts_json TEXT NOT NULL,
+                stdout TEXT NOT NULL,
+                stderr TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY(task_name, fingerprint)
+            );",
+        )
+        .expect("create pre-duration schema");
+
+        let old_artifacts = serde_json::to_string(&Vec::<CachedArtifact>::new()).expect("json");
+        conn.execute(
+            "INSERT INTO executions
+             (task_name, fingerprint, manifest_json, artifacts_json, stdout, stderr, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params!["build", "fp-pre-duration", "{}", old_artifacts, "", "", 9i64],
+        )
+        .expect("insert pre-duration row");
+        drop(conn);
+
+        let store = LocalArtifactStore::new(&cache_root).expect("reopen store with migration");
+        let fetched = store
+            .fetch_execution("build", "fp-pre-duration")
+            .expect("fetch migrated row")
+            .expect("row exists");
+        // Backfilled rows default to 0 — TUI treats this as "no ETA".
+        assert_eq!(fetched.duration_ms, 0);
+
+        // New writes against the migrated schema persist non-zero durations.
+        let next = ExecutionRecord {
+            task_name: "build".to_string(),
+            fingerprint: "fp-new".to_string(),
+            manifest: BTreeMap::new(),
+            artifacts: vec![],
+            stdout: "".to_string(),
+            stderr: "".to_string(),
+            created_at: 99,
+            duration_ms: 4321,
+        };
+        store.save_execution(&next).expect("save new row after migration");
+        let latest =
+            store.fetch_latest_execution("build").expect("fetch latest").expect("row exists");
+        assert_eq!(latest.duration_ms, 4321);
     }
 
     #[test]

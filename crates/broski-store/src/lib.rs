@@ -27,6 +27,11 @@ pub struct ExecutionRecord {
     pub stdout: String,
     pub stderr: String,
     pub created_at: i64,
+    /// Total wall-clock duration of the run, in milliseconds. Zero for
+    /// records written before the field existed (the `cache.db` migration
+    /// backfills the column with `0`).
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
