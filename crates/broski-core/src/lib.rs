@@ -1,3 +1,4 @@
+pub mod cancel;
 pub mod config;
 pub mod executor;
 pub mod fingerprint;
@@ -7,6 +8,8 @@ pub mod parser_winnow;
 pub mod resolver;
 pub mod runtime;
 pub mod validator;
+
+pub use cancel::{CancelLevel, CancellationToken};
 
 pub use config::{load_broskifile, parse_broskifile_with_mode, ParserMode};
 pub use executor::{

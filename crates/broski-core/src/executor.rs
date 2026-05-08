@@ -21,6 +21,7 @@ use rayon::prelude::*;
 use tempfile::{NamedTempFile, TempDir};
 use walkdir::{DirEntry, WalkDir};
 
+use crate::cancel::CancellationToken;
 use crate::fingerprint::{compute_fingerprint, FingerprintOptions};
 use crate::graph::TaskGraph;
 use crate::model::{BroskiFile, IsolationMode, TaskMode, TaskSpec};
@@ -45,6 +46,11 @@ pub struct RunOptions {
     /// line-by-line and emit each line as `ProgressEvent::LogLine`. Defaults
     /// to `false`; the CLI keeps `Stdio::inherit` behavior.
     pub capture_output: bool,
+    /// Optional cooperative cancellation handle. When set, the executor
+    /// checks it between layers and before each task; on a hard cancel the
+    /// in-flight child receives `SIGTERM`. `None` (the default) preserves
+    /// the pre-cancellation behavior exactly.
+    pub cancellation: Option<CancellationToken>,
 }
 
 impl Default for RunOptions {
@@ -60,6 +66,7 @@ impl Default for RunOptions {
             passthrough_args: Vec::new(),
             event_sink: None,
             capture_output: false,
+            cancellation: None,
         }
     }
 }
@@ -69,6 +76,7 @@ pub struct RunSummary {
     pub executed: Vec<String>,
     pub cache_hits: Vec<String>,
     pub dry_run: Vec<String>,
+    pub skipped: Vec<String>,
     pub cache_miss_reasons: BTreeMap<String, Vec<String>>,
 }
 
@@ -77,6 +85,7 @@ struct TaskOutcome {
     task_name: String,
     from_cache: bool,
     dry_run: bool,
+    skipped: bool,
     cache_miss_reasons: Vec<String>,
 }
 
@@ -489,6 +498,26 @@ impl Executor {
         options: &RunOptions,
         progress: Option<Sender<ProgressEvent>>,
     ) -> Result<TaskOutcome> {
+        if let Some(token) = &options.cancellation {
+            if token.is_cancelled() {
+                emit_progress(
+                    &progress,
+                    ProgressEvent::TaskFinished {
+                        task: task_name.to_string(),
+                        status: TaskStatus::Skipped,
+                        duration: Duration::ZERO,
+                        error: None,
+                    },
+                );
+                return Ok(TaskOutcome {
+                    task_name: task_name.to_string(),
+                    from_cache: false,
+                    dry_run: false,
+                    skipped: true,
+                    cache_miss_reasons: Vec::new(),
+                });
+            }
+        }
         let task = self
             .config
             .task
@@ -534,6 +563,7 @@ impl Executor {
                     task_name: task_name.to_string(),
                     from_cache: false,
                     dry_run: true,
+                    skipped: false,
                     cache_miss_reasons: if options.explain {
                         vec!["cache bypass: interactive mode".to_string()]
                     } else {
@@ -549,6 +579,7 @@ impl Executor {
                 &resolved_env,
                 redactor.as_ref(),
                 &passthrough_args,
+                options.cancellation.as_ref(),
             )
             .with_context(|| format!("executing interactive task '{}'", task_name))?;
             if show_progress {
@@ -566,6 +597,7 @@ impl Executor {
                 task_name: task_name.to_string(),
                 from_cache: false,
                 dry_run: false,
+                skipped: false,
                 cache_miss_reasons: if options.explain {
                     vec!["cache bypass: interactive mode".to_string()]
                 } else {
@@ -623,6 +655,7 @@ impl Executor {
                         task_name: task_name.to_string(),
                         from_cache: true,
                         dry_run: true,
+                        skipped: false,
                         cache_miss_reasons: Vec::new(),
                     });
                 }
@@ -650,6 +683,7 @@ impl Executor {
                     task_name: task_name.to_string(),
                     from_cache: true,
                     dry_run: false,
+                    skipped: false,
                     cache_miss_reasons: timing_lines(task_name, &timings, show_timings),
                 });
             }
@@ -676,6 +710,7 @@ impl Executor {
                 task_name: task_name.to_string(),
                 from_cache: false,
                 dry_run: true,
+                skipped: false,
                 cache_miss_reasons,
             });
         }
@@ -769,6 +804,7 @@ impl Executor {
             task_name: task_name.to_string(),
             from_cache: false,
             dry_run: false,
+            skipped: false,
             cache_miss_reasons: {
                 if show_timings {
                     cache_miss_reasons.extend(timing_lines(task_name, &timings, true));
@@ -898,6 +934,10 @@ impl Executor {
         let mut child = command.spawn().with_context(|| {
             format!("spawning task command '{}'", invocation.display_command)
         })?;
+        let pid = child.id();
+        if let Some(token) = &options.cancellation {
+            token.register_child(pid);
+        }
         let stdout = child
             .stdout
             .take()
@@ -913,6 +953,9 @@ impl Executor {
         let status = child.wait().with_context(|| {
             format!("waiting on task command '{}'", invocation.display_command)
         })?;
+        if let Some(token) = &options.cancellation {
+            token.unregister_child(pid);
+        }
         let stdout_bytes = stdout_handle
             .join()
             .map_err(|_| anyhow!("stdout capture thread panicked"))??;
@@ -929,6 +972,7 @@ impl Executor {
         resolved_env: &BTreeMap<String, String>,
         redactor: Option<&SecretRedactor>,
         passthrough_args: &[String],
+        cancellation: Option<&CancellationToken>,
     ) -> Result<()> {
         let invocation = prepare_task_invocation(&self.workspace_root, task, passthrough_args)?;
         println!("[{task_name}] $ {}", invocation.display_command);
@@ -952,6 +996,10 @@ impl Executor {
             let mut child = command.spawn().with_context(|| {
                 format!("spawning interactive task command '{}'", invocation.display_command)
             })?;
+            let pid = child.id();
+            if let Some(token) = cancellation {
+                token.register_child(pid);
+            }
             let stdout = child.stdout.take().ok_or_else(|| {
                 anyhow!("interactive command stdout was not captured for redaction")
             })?;
@@ -964,6 +1012,9 @@ impl Executor {
             let status = child.wait().with_context(|| {
                 format!("waiting for interactive task command '{}'", invocation.display_command)
             })?;
+            if let Some(token) = cancellation {
+                token.unregister_child(pid);
+            }
 
             stdout_thread
                 .join()
@@ -973,11 +1024,25 @@ impl Executor {
                 .map_err(|_| anyhow!("interactive stderr redaction thread panicked"))??;
             status
         } else {
-            command.status().with_context(|| {
+            let mut child = command.spawn().with_context(|| {
                 format!("spawning interactive task command '{}'", invocation.display_command)
-            })?
+            })?;
+            let pid = child.id();
+            if let Some(token) = cancellation {
+                token.register_child(pid);
+            }
+            let status = child.wait().with_context(|| {
+                format!("waiting for interactive task command '{}'", invocation.display_command)
+            })?;
+            if let Some(token) = cancellation {
+                token.unregister_child(pid);
+            }
+            status
         };
         if status.success() {
+            Ok(())
+        } else if cancellation.is_some_and(|t| t.is_cancelled()) {
+            // The non-zero exit was caused by our own SIGTERM; treat as graceful.
             Ok(())
         } else {
             Err(anyhow!("interactive task '{}' failed with status {}", task_name, status))
@@ -1326,7 +1391,9 @@ fn selected_isolation(task: &TaskSpec, options: &RunOptions) -> IsolationMode {
 
 fn apply_outcome(summary: &mut RunSummary, outcome: TaskOutcome) {
     let task_name = outcome.task_name.clone();
-    if outcome.dry_run {
+    if outcome.skipped {
+        summary.skipped.push(task_name.clone());
+    } else if outcome.dry_run {
         summary.dry_run.push(task_name.clone());
     } else if outcome.from_cache {
         summary.cache_hits.push(task_name.clone());
@@ -2905,5 +2972,85 @@ mod tests {
         assert!(!events.is_empty(), "expected at least one event");
         assert!(matches!(events.first(), Some(ProgressEvent::RunStarted { .. })));
         assert!(matches!(events.last(), Some(ProgressEvent::RunFinished)));
+    }
+
+    #[test]
+    fn cancellation_skips_remaining_tasks_in_a_layer() {
+        // Two-task layer: cancel before either runs and assert both come back
+        // as Skipped, RunSummary lists them under `skipped`, and `executed`
+        // is empty.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let mut tasks = BTreeMap::new();
+        for name in ["alpha", "beta"] {
+            tasks.insert(
+                name.to_string(),
+                TaskSpec {
+                    deps: vec![],
+                    description: None,
+                    resolved_variables: BTreeMap::new(),
+                    inputs: vec![],
+                    stage_ro: vec![],
+                    outputs: vec![],
+                    env: BTreeMap::new(),
+                    env_inherit: Vec::new(),
+                    secret_env: Vec::new(),
+                    run: RunSpec::Shell("true".to_string()),
+                    isolation: Some(IsolationMode::Off),
+                    mode: Some(TaskMode::Interactive),
+                    working_dir: None,
+                    params: Vec::new(),
+                    private: false,
+                    confirm: None,
+                    shell_override: None,
+                    requires: Vec::new(),
+                },
+            );
+        }
+        tasks.insert(
+            "dev".to_string(),
+            TaskSpec {
+                deps: vec!["alpha".to_string(), "beta".to_string()],
+                description: None,
+                resolved_variables: BTreeMap::new(),
+                inputs: vec![],
+                stage_ro: vec![],
+                outputs: vec![],
+                env: BTreeMap::new(),
+                env_inherit: Vec::new(),
+                secret_env: Vec::new(),
+                run: RunSpec::Shell("true".to_string()),
+                isolation: Some(IsolationMode::Off),
+                mode: Some(TaskMode::Interactive),
+                working_dir: None,
+                params: Vec::new(),
+                private: false,
+                confirm: None,
+                shell_override: None,
+                requires: Vec::new(),
+            },
+        );
+
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let token = crate::cancel::CancellationToken::new();
+        token.cancel(crate::cancel::CancelLevel::Soft);
+        let opts = RunOptions { cancellation: Some(token), ..RunOptions::default() };
+        let summary = executor.run_target("dev", &opts).expect("run with prior cancel");
+
+        assert!(summary.executed.is_empty(), "no task should run after pre-cancel");
+        assert_eq!(summary.skipped.len(), 3, "all three tasks should be skipped");
+        assert!(summary.skipped.contains(&"alpha".to_string()));
+        assert!(summary.skipped.contains(&"beta".to_string()));
+        assert!(summary.skipped.contains(&"dev".to_string()));
     }
 }
