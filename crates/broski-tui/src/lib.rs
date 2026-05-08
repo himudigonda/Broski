@@ -16,3 +16,4 @@ mod app;
 
 pub use app::run;
 pub use state::{LogLineRecord, TaskState, TuiState};
+pub use theme::{Palette, Theme};

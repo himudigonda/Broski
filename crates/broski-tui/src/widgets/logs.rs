@@ -8,15 +8,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use crate::state::{TaskInfo, TuiState};
-use crate::theme;
+use crate::theme::Palette;
 
 pub struct LogsWidget<'s> {
     state: &'s TuiState,
+    palette: &'s Palette,
 }
 
 impl<'s> LogsWidget<'s> {
-    pub fn new(state: &'s TuiState) -> Self {
-        Self { state }
+    pub fn new(state: &'s TuiState, palette: &'s Palette) -> Self {
+        Self { state, palette }
     }
 }
 
@@ -30,21 +31,21 @@ impl Widget for LogsWidget<'_> {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::ACCENT));
+            .border_style(Style::default().fg(self.palette.accent));
 
         let mut lines: Vec<Line> = Vec::new();
         if let Some(name) = task {
             if let Some(info) = self.state.tasks.get(name) {
                 if info.logs.is_empty() {
-                    lines.push(empty_message(info));
+                    lines.push(empty_message(info, self.palette));
                 } else {
                     let max_visible = area.height.saturating_sub(2) as usize;
                     let total = info.logs.len();
                     let start = total.saturating_sub(max_visible);
                     for record in info.logs.iter().skip(start) {
                         let color = match record.stream {
-                            LogStream::Stdout => theme::STDOUT,
-                            LogStream::Stderr => theme::STDERR,
+                            LogStream::Stdout => self.palette.stdout,
+                            LogStream::Stderr => self.palette.stderr,
                         };
                         lines.push(Line::from(Span::styled(
                             record.line.clone(),
@@ -55,14 +56,14 @@ impl Widget for LogsWidget<'_> {
                 if let Some(error) = info.error.as_ref() {
                     lines.push(Line::from(Span::styled(
                         format!("error: {error}"),
-                        Style::default().fg(theme::FAILED),
+                        Style::default().fg(self.palette.failed),
                     )));
                 }
             }
         } else {
             lines.push(Line::from(Span::styled(
                 "  (no task selected)",
-                Style::default().fg(theme::HELP),
+                Style::default().fg(self.palette.help),
             )));
         }
 
@@ -70,10 +71,10 @@ impl Widget for LogsWidget<'_> {
     }
 }
 
-fn empty_message(info: &TaskInfo) -> Line<'static> {
+fn empty_message(info: &TaskInfo, palette: &Palette) -> Line<'static> {
     let detail = match info.current_phase {
         Some(phase) => format!("  (no logs yet · current phase: {:?})", phase),
         None => "  (no logs)".to_string(),
     };
-    Line::from(Span::styled(detail, Style::default().fg(theme::HELP)))
+    Line::from(Span::styled(detail, Style::default().fg(palette.help)))
 }

@@ -41,6 +41,13 @@ enum Command {
         force_isolation: bool,
         #[arg(long)]
         jobs: Option<usize>,
+        /// Launch the ratatui dashboard for this run.
+        #[arg(long)]
+        tui: bool,
+        /// Theme name for the dashboard (default, dark, light, high-contrast).
+        /// Falls back to the `BROSKI_THEME` env var, then the default theme.
+        #[arg(long, value_name = "NAME")]
+        theme: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -71,6 +78,10 @@ enum Command {
         force_isolation: bool,
         #[arg(long)]
         jobs: Option<usize>,
+        /// Theme name (default, dark, light, high-contrast). Falls back to
+        /// the `BROSKI_THEME` env var, then the default theme.
+        #[arg(long, value_name = "NAME")]
+        theme: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -166,11 +177,12 @@ fn run() -> Result<()> {
             watch,
             force_isolation,
             jobs,
+            tui,
+            theme,
             args,
         }) => {
             let config = load_and_validate(&workspace)?;
             let cache = LocalArtifactStore::new(cache_root(&workspace))?;
-            let executor = Executor::new(&workspace, config, Arc::new(cache))?;
 
             let mut options = RunOptions {
                 dry_run,
@@ -186,32 +198,31 @@ fn run() -> Result<()> {
                 options.jobs = j.max(1);
             }
 
-            let summary = executor.run_target(&task, &options)?;
-
-            if !summary.cache_hits.is_empty() {
-                println!("cache hits: {}", summary.cache_hits.join(", "));
-            }
-            if !summary.executed.is_empty() {
-                println!("executed: {}", summary.executed.join(", "));
-            }
-            if !summary.dry_run.is_empty() {
-                println!("dry-run: {}", summary.dry_run.join(", "));
-            }
-            if options.explain {
-                for (task_name, reasons) in &summary.cache_miss_reasons {
-                    println!("explain {}:", task_name);
-                    for reason in reasons.iter().take(10) {
-                        println!("- {}", reason);
-                    }
-                    if reasons.len() > 10 {
-                        println!("- +{} more changes", reasons.len() - 10);
-                    }
+            if tui {
+                if dry_run || explain || watch {
+                    return Err(anyhow!(
+                        "--tui cannot be combined with --dry-run, --explain, or --watch"
+                    ));
                 }
+                let theme = resolve_theme(theme.as_deref())?;
+                let summary = broski_tui::run(
+                    workspace.clone(),
+                    config,
+                    Arc::new(cache),
+                    task,
+                    options,
+                    theme,
+                )?;
+                emit_run_summary(&summary, false);
+                return Ok(());
             }
 
+            let executor = Executor::new(&workspace, config, Arc::new(cache))?;
+            let summary = executor.run_target(&task, &options)?;
+            emit_run_summary(&summary, options.explain);
             Ok(())
         }
-        Some(Command::Tui { task, force, no_cache, force_isolation, jobs, args }) => {
+        Some(Command::Tui { task, force, no_cache, force_isolation, jobs, theme, args }) => {
             let config = load_and_validate(&workspace)?;
             let cache = LocalArtifactStore::new(cache_root(&workspace))?;
             let mut options = RunOptions {
@@ -224,12 +235,14 @@ fn run() -> Result<()> {
             if let Some(j) = jobs {
                 options.jobs = j.max(1);
             }
+            let theme = resolve_theme(theme.as_deref())?;
             let summary = broski_tui::run(
                 workspace.clone(),
                 config,
                 Arc::new(cache),
                 task,
                 options,
+                theme,
             )?;
             if !summary.cache_hits.is_empty() {
                 println!("cache hits: {}", summary.cache_hits.join(", "));
@@ -495,6 +508,45 @@ fn run_cache_command(workspace: &Path, command: CacheCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_theme(flag: Option<&str>) -> Result<broski_tui::Theme> {
+    if let Some(value) = flag {
+        return value
+            .parse::<broski_tui::Theme>()
+            .with_context(|| format!("parsing --theme value '{}'", value));
+    }
+    if let Ok(value) = std::env::var("BROSKI_THEME") {
+        if !value.trim().is_empty() {
+            return value
+                .parse::<broski_tui::Theme>()
+                .with_context(|| format!("parsing BROSKI_THEME value '{}'", value));
+        }
+    }
+    Ok(broski_tui::Theme::Default)
+}
+
+fn emit_run_summary(summary: &broski_core::RunSummary, explain: bool) {
+    if !summary.cache_hits.is_empty() {
+        println!("cache hits: {}", summary.cache_hits.join(", "));
+    }
+    if !summary.executed.is_empty() {
+        println!("executed: {}", summary.executed.join(", "));
+    }
+    if !summary.dry_run.is_empty() {
+        println!("dry-run: {}", summary.dry_run.join(", "));
+    }
+    if explain {
+        for (task_name, reasons) in &summary.cache_miss_reasons {
+            println!("explain {}:", task_name);
+            for reason in reasons.iter().take(10) {
+                println!("- {}", reason);
+            }
+            if reasons.len() > 10 {
+                println!("- +{} more changes", reasons.len() - 10);
+            }
+        }
+    }
 }
 
 fn cache_root(workspace: &Path) -> PathBuf {

@@ -1,25 +1,27 @@
 //! DAG widget: layered task list with status icons.
 //!
 //! Rendering is stateless and reads from [`TuiState`] — every redraw rebuilds
-//! the lines. This keeps the redraw logic dirt-simple at the cost of a small
-//! amount of allocation per frame; with task counts in the dozens that's fine.
+//! the lines. With task counts in the dozens that's fine.
+
+use std::time::Duration;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget};
 
 use crate::state::{TaskState, TuiState};
-use crate::theme;
+use crate::theme::Palette;
 
 pub struct DagWidget<'s> {
     state: &'s TuiState,
+    palette: &'s Palette,
 }
 
 impl<'s> DagWidget<'s> {
-    pub fn new(state: &'s TuiState) -> Self {
-        Self { state }
+    pub fn new(state: &'s TuiState, palette: &'s Palette) -> Self {
+        Self { state, palette }
     }
 }
 
@@ -32,23 +34,31 @@ impl Widget for DagWidget<'_> {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::ACCENT));
+            .border_style(Style::default().fg(self.palette.accent));
 
         let mut items: Vec<ListItem> = Vec::new();
         for (layer_idx, layer) in self.state.layers.iter().enumerate() {
             for name in layer {
                 let info = self.state.tasks.get(name);
-                let (icon, color) = task_icon(info.map(|i| i.state));
+                let (icon, color) = task_icon(info.map(|i| i.state), self.palette);
                 let mut spans = vec![
                     Span::styled(format!("{icon} "), Style::default().fg(color)),
-                    Span::styled(name.clone(), Style::default().fg(theme::FG)),
+                    Span::styled(name.clone(), Style::default().fg(self.palette.fg)),
                 ];
                 if let Some(info) = info {
                     if !info.duration.is_zero() {
                         spans.push(Span::styled(
-                            format!("  {:.1}s", info.duration.as_secs_f32()),
-                            Style::default().fg(theme::HELP),
+                            format!("  {}", format_duration(info.duration)),
+                            Style::default().fg(self.palette.help),
                         ));
+                    }
+                    if matches!(info.state, TaskState::Running | TaskState::Queued) {
+                        if let Some(eta) = self.state.etas.get(name) {
+                            spans.push(Span::styled(
+                                format!("  ~{}", format_duration(*eta)),
+                                Style::default().fg(self.palette.eta),
+                            ));
+                        }
                     }
                 }
                 items.push(ListItem::new(Line::from(spans)));
@@ -56,7 +66,7 @@ impl Widget for DagWidget<'_> {
             if layer_idx + 1 < self.state.layers.len() {
                 items.push(ListItem::new(Line::from(Span::styled(
                     "  ↓",
-                    Style::default().fg(theme::HELP),
+                    Style::default().fg(self.palette.help),
                 ))));
             }
         }
@@ -64,7 +74,7 @@ impl Widget for DagWidget<'_> {
         if items.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled(
                 "  (waiting for run start…)",
-                Style::default().fg(theme::HELP),
+                Style::default().fg(self.palette.help),
             ))));
         }
 
@@ -73,22 +83,37 @@ impl Widget for DagWidget<'_> {
 
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))
+            .highlight_style(
+                Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("▶ ");
 
         StatefulWidget::render(list, area, buf, &mut list_state);
     }
 }
 
-fn task_icon(state: Option<TaskState>) -> (&'static str, ratatui::style::Color) {
+fn task_icon(state: Option<TaskState>, palette: &Palette) -> (&'static str, Color) {
     match state {
-        Some(TaskState::Running) => ("●", theme::RUNNING),
-        Some(TaskState::Done) => ("✓", theme::DONE),
-        Some(TaskState::Cached) => ("⊙", theme::CACHED),
-        Some(TaskState::Failed) => ("✗", theme::FAILED),
-        Some(TaskState::DryRun) => ("·", theme::QUEUED),
-        Some(TaskState::Skipped) => ("⊘", theme::QUEUED),
-        Some(TaskState::Queued) | None => ("○", theme::QUEUED),
+        Some(TaskState::Running) => ("●", palette.running),
+        Some(TaskState::Done) => ("✓", palette.done),
+        Some(TaskState::Cached) => ("⊙", palette.cached),
+        Some(TaskState::Failed) => ("✗", palette.failed),
+        Some(TaskState::DryRun) => ("·", palette.queued),
+        Some(TaskState::Skipped) => ("⊘", palette.queued),
+        Some(TaskState::Queued) | None => ("○", palette.queued),
+    }
+}
+
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs_f32();
+    if secs < 1.0 {
+        format!("{}ms", d.as_millis())
+    } else if secs < 60.0 {
+        format!("{:.1}s", secs)
+    } else {
+        let m = (secs / 60.0).floor() as u64;
+        let s = secs - (m * 60) as f32;
+        format!("{}m{:.0}s", m, s)
     }
 }
 
@@ -106,7 +131,7 @@ fn visible_index(state: &TuiState, flat_idx: usize) -> usize {
             visible += 1;
         }
         if layer_idx + 1 < state.layers.len() {
-            visible += 1; // the divider row
+            visible += 1;
         }
     }
     visible.saturating_sub(1)

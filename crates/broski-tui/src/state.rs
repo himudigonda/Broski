@@ -3,7 +3,7 @@
 //! Pure: every external input is folded into state through [`TuiState::apply`].
 //! No I/O happens here — easy to unit-test, easy to reason about.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Duration;
 
 use broski_core::{LogStream, ProgressEvent, TaskPhase, TaskStatus};
@@ -74,11 +74,36 @@ pub struct TuiState {
     pub done_count: u32,
     pub cached_count: u32,
     pub failed_count: u32,
+    /// Estimated duration per task, prefetched from the artifact-store
+    /// history before the run starts. Empty when no history exists yet.
+    pub etas: BTreeMap<String, Duration>,
 }
 
 impl TuiState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct with prefetched per-task ETAs (typically the most recent
+    /// successful run's wall-clock duration).
+    pub fn with_etas(etas: BTreeMap<String, Duration>) -> Self {
+        Self { etas, ..Self::default() }
+    }
+
+    /// Sum of ETAs for tasks still queued or running. Returns
+    /// `Duration::ZERO` when no relevant ETAs exist.
+    pub fn remaining_eta(&self) -> Duration {
+        self.task_order
+            .iter()
+            .filter_map(|name| {
+                let info = self.tasks.get(name)?;
+                if matches!(info.state, TaskState::Queued | TaskState::Running) {
+                    self.etas.get(name).copied()
+                } else {
+                    None
+                }
+            })
+            .sum()
     }
 
     /// Apply one event. Pure: returns nothing, mutates state.
@@ -299,6 +324,54 @@ mod tests {
         s.apply(ev_run_started(vec![vec!["a"]]));
         s.apply(ProgressEvent::RunFinished);
         assert!(s.run_finished);
+    }
+
+    #[test]
+    fn remaining_eta_sums_only_queued_and_running_tasks() {
+        let mut etas = BTreeMap::new();
+        etas.insert("a".to_string(), Duration::from_secs(2));
+        etas.insert("b".to_string(), Duration::from_secs(3));
+        etas.insert("c".to_string(), Duration::from_secs(5));
+        let mut s = TuiState::with_etas(etas);
+        s.apply(ev_run_started(vec![vec!["a", "b", "c"]]));
+        // Initially all queued -> sum is 2+3+5 = 10.
+        assert_eq!(s.remaining_eta(), Duration::from_secs(10));
+
+        // Mark `a` running: still counts toward remaining.
+        s.apply(ProgressEvent::TaskStarted {
+            task: "a".to_string(),
+            mode: broski_core::TaskMode::Graph,
+        });
+        assert_eq!(s.remaining_eta(), Duration::from_secs(10));
+
+        // Finish `a`: should drop from remaining.
+        s.apply(ProgressEvent::TaskFinished {
+            task: "a".to_string(),
+            status: TaskStatus::Executed,
+            duration: Duration::from_secs(2),
+            error: None,
+        });
+        assert_eq!(s.remaining_eta(), Duration::from_secs(8));
+
+        // Cache hit on `b`: also drops.
+        s.apply(ProgressEvent::TaskStarted {
+            task: "b".to_string(),
+            mode: broski_core::TaskMode::Graph,
+        });
+        s.apply(ProgressEvent::TaskFinished {
+            task: "b".to_string(),
+            status: TaskStatus::CacheHit,
+            duration: Duration::from_millis(5),
+            error: None,
+        });
+        assert_eq!(s.remaining_eta(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn remaining_eta_is_zero_with_no_history() {
+        let mut s = TuiState::new();
+        s.apply(ev_run_started(vec![vec!["a"]]));
+        assert_eq!(s.remaining_eta(), Duration::ZERO);
     }
 
     #[test]

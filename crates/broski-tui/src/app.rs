@@ -7,6 +7,7 @@
 //! - On user quit, foreground tears down the terminal and joins the bg thread
 //!   (executor finishes naturally; we don't yet have cancellation).
 
+use std::collections::BTreeMap;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, TryRecvError};
@@ -15,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use broski_core::{BroskiFile, Executor, ProgressEvent, RunOptions, RunSummary};
+use broski_core::{BroskiFile, Executor, ProgressEvent, RunOptions, RunSummary, TaskGraph};
 use broski_store::ArtifactStore;
 use crossterm::event::{self, Event};
 use crossterm::execute;
@@ -28,6 +29,7 @@ use ratatui::Terminal;
 
 use crate::keys::{map_key, Action};
 use crate::state::TuiState;
+use crate::theme::{Palette, Theme};
 use crate::widgets::dag::DagWidget;
 use crate::widgets::help::HelpFooter;
 use crate::widgets::logs::LogsWidget;
@@ -39,14 +41,19 @@ const TICK_MS: u64 = 75;
 
 /// Launch the TUI for a given target. Blocks until the user quits.
 ///
-/// The terminal is restored even if the inner work panics.
+/// The terminal is restored even if the inner work panics. ETAs for the
+/// resolved task graph are prefetched from the artifact store before any
+/// pixels are drawn, so the dashboard shows estimates from frame zero.
 pub fn run(
     workspace: PathBuf,
     config: BroskiFile,
     store: Arc<dyn ArtifactStore>,
     target: String,
     mut base_options: RunOptions,
+    theme: Theme,
 ) -> Result<RunSummary> {
+    let etas = prefetch_etas(&config, &target, store.as_ref());
+
     let (event_tx, event_rx) = mpsc::channel::<ProgressEvent>();
     base_options.event_sink = Some(event_tx);
     base_options.capture_output = true;
@@ -61,7 +68,8 @@ pub fn run(
     });
 
     let mut terminal = enter_terminal().context("entering alt screen / raw mode")?;
-    let result = drive_loop(&mut terminal, event_rx);
+    let palette = theme.palette();
+    let result = drive_loop(&mut terminal, event_rx, &palette, etas);
     let _ = leave_terminal(&mut terminal);
 
     let summary = executor_handle
@@ -71,18 +79,52 @@ pub fn run(
     Ok(summary)
 }
 
+/// Walk the resolved task graph and ask the artifact store for the most
+/// recent successful execution per task. Returns durations keyed by task name.
+/// Any failure (no graph, missing record, store error) is silently absorbed —
+/// ETAs are a UX nicety, not a correctness requirement.
+fn prefetch_etas(
+    config: &BroskiFile,
+    target: &str,
+    store: &dyn ArtifactStore,
+) -> BTreeMap<String, Duration> {
+    let mut etas = BTreeMap::new();
+    let resolved = match config.resolve_task_name(target) {
+        Ok(name) => name,
+        Err(_) => return etas,
+    };
+    let graph = match TaskGraph::build(&config.task) {
+        Ok(g) => g,
+        Err(_) => return etas,
+    };
+    let required = match graph.required_tasks_for_target(&resolved) {
+        Ok(tasks) => tasks,
+        Err(_) => return etas,
+    };
+    for name in required {
+        if let Ok(Some(record)) = store.fetch_latest_execution(&name) {
+            if record.duration_ms > 0 {
+                etas.insert(name, Duration::from_millis(record.duration_ms));
+            }
+        }
+    }
+    etas
+}
+
 fn drive_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     event_rx: mpsc::Receiver<ProgressEvent>,
+    palette: &Palette,
+    etas: BTreeMap<String, Duration>,
 ) -> Result<()> {
-    let mut state = TuiState::new();
+    let mut state = TuiState::with_etas(etas);
     let mut dirty = true;
     let mut channel_open = true;
     let tick = Duration::from_millis(TICK_MS);
 
     loop {
         if dirty {
-            redraw(terminal, &state)?;
+            redraw(terminal, &state, palette)?;
             dirty = false;
         }
 
@@ -165,6 +207,7 @@ fn apply_action(state: &mut TuiState, action: Action) -> bool {
 fn redraw(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &TuiState,
+    palette: &Palette,
 ) -> Result<()> {
     terminal
         .draw(|frame| {
@@ -183,10 +226,10 @@ fn redraw(
                 .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
                 .split(outer[0]);
 
-            frame.render_widget(DagWidget::new(state), body[0]);
-            frame.render_widget(LogsWidget::new(state), body[1]);
-            frame.render_widget(SummaryWidget::new(state), outer[1]);
-            frame.render_widget(HelpFooter, outer[2]);
+            frame.render_widget(DagWidget::new(state, palette), body[0]);
+            frame.render_widget(LogsWidget::new(state, palette), body[1]);
+            frame.render_widget(SummaryWidget::new(state, palette), outer[1]);
+            frame.render_widget(HelpFooter::new(palette), outer[2]);
         })
         .context("drawing TUI frame")?;
     Ok(())
