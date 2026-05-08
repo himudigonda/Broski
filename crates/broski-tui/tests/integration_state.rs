@@ -67,11 +67,7 @@ fn executor_event_stream_folds_into_tui_state_with_logs() {
     let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
 
     let (tx, rx) = mpsc::channel::<ProgressEvent>();
-    let opts = RunOptions {
-        event_sink: Some(tx),
-        capture_output: true,
-        ..RunOptions::default()
-    };
+    let opts = RunOptions { event_sink: Some(tx), capture_output: true, ..RunOptions::default() };
     executor.run_target("build", &opts).expect("run ok");
     drop(opts);
 
@@ -114,14 +110,12 @@ fn second_run_records_duration_for_eta_consumption() {
         load_env: Vec::new(),
     };
     let cache = Arc::new(LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache"));
-    let executor =
-        Executor::new(&workspace, config, cache.clone() as Arc<dyn ArtifactStore>).expect("executor");
+    let executor = Executor::new(&workspace, config, cache.clone() as Arc<dyn ArtifactStore>)
+        .expect("executor");
     executor.run_target("build", &RunOptions::default()).expect("run ok");
 
-    let record = cache
-        .fetch_latest_execution("build")
-        .expect("fetch latest")
-        .expect("record exists");
+    let record =
+        cache.fetch_latest_execution("build").expect("fetch latest").expect("record exists");
     // Even a trivial echo should land in the millisecond range; 0 means the
     // executor didn't populate the field.
     assert!(record.duration_ms > 0, "expected non-zero duration_ms, got {}", record.duration_ms);

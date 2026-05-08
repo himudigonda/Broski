@@ -51,11 +51,7 @@ pub trait ArtifactStore: Send + Sync {
     /// Return up to `limit` records, newest first. When `task` is `Some`,
     /// scoped to that task; when `None`, returns the most recent record per
     /// known task (one row per task). Used by `broski history`.
-    fn fetch_history(
-        &self,
-        task: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<ExecutionRecord>>;
+    fn fetch_history(&self, task: Option<&str>, limit: usize) -> Result<Vec<ExecutionRecord>>;
     fn save_execution(&self, record: &ExecutionRecord) -> Result<()>;
     fn store_artifacts(&self, workspace: &Path, outputs: &[PathBuf])
         -> Result<Vec<CachedArtifact>>;

@@ -83,9 +83,7 @@ impl Widget for DagWidget<'_> {
 
         let list = List::new(items)
             .block(block)
-            .highlight_style(
-                Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(Style::default().fg(self.palette.accent).add_modifier(Modifier::BOLD))
             .highlight_symbol("▶ ");
 
         StatefulWidget::render(list, area, buf, &mut list_state);

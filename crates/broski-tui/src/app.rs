@@ -78,9 +78,8 @@ pub fn run(
     let result = drive_loop(&mut terminal, event_rx, &palette, etas, &cancellation);
     let _ = leave_terminal(&mut terminal);
 
-    let summary = executor_handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("executor thread panicked"))??;
+    let summary =
+        executor_handle.join().map_err(|_| anyhow::anyhow!("executor thread panicked"))??;
     result?;
     Ok(summary)
 }
@@ -228,11 +227,8 @@ fn apply_action(
             false
         }
         Action::SelectLast => {
-            state.selected = if state.task_order.is_empty() {
-                None
-            } else {
-                Some(state.task_order.len() - 1)
-            };
+            state.selected =
+                if state.task_order.is_empty() { None } else { Some(state.task_order.len() - 1) };
             false
         }
         Action::ClearLogs => {
@@ -253,11 +249,7 @@ fn redraw(
             let area = frame.area();
             let outer = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(8),
-                    Constraint::Length(3),
-                    Constraint::Length(1),
-                ])
+                .constraints([Constraint::Min(8), Constraint::Length(3), Constraint::Length(1)])
                 .split(area);
 
             let body = Layout::default()

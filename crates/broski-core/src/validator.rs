@@ -353,26 +353,16 @@ mod tests {
     fn rejects_future_minor() {
         let (major, _minor) = pkg_two_part();
         let declared = format!("{}.99", major);
-        let error =
-            super::validate_version(&declared).expect_err("future minor must be rejected");
-        assert!(
-            error.to_string().contains("upgrade broski"),
-            "unexpected error: {}",
-            error
-        );
+        let error = super::validate_version(&declared).expect_err("future minor must be rejected");
+        assert!(error.to_string().contains("upgrade broski"), "unexpected error: {}", error);
     }
 
     #[test]
     fn rejects_future_major() {
         let (major, _minor) = pkg_two_part();
         let declared = format!("{}.0", major + 1);
-        let error =
-            super::validate_version(&declared).expect_err("future major must be rejected");
-        assert!(
-            error.to_string().contains("major mismatch"),
-            "unexpected error: {}",
-            error
-        );
+        let error = super::validate_version(&declared).expect_err("future major must be rejected");
+        assert!(error.to_string().contains("major mismatch"), "unexpected error: {}", error);
     }
 
     #[test]

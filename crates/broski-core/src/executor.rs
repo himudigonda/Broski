@@ -154,12 +154,7 @@ pub enum ProgressEvent {
     /// A captured stdout/stderr line. Only emitted when `RunOptions::capture_output` is true.
     LogLine { task: String, stream: LogStream, line: String },
     /// Terminal event for a task. `duration` is sum-of-observed-phases.
-    TaskFinished {
-        task: String,
-        status: TaskStatus,
-        duration: Duration,
-        error: Option<String>,
-    },
+    TaskFinished { task: String, status: TaskStatus, duration: Duration, error: Option<String> },
     /// Last event of every run.
     RunFinished,
 }
@@ -191,14 +186,7 @@ impl Executor {
         let graph = TaskGraph::build(&config.task)?;
         let fingerprint_key = load_or_create_fingerprint_key(&workspace_root)?;
 
-        Ok(Self {
-            workspace_root,
-            config,
-            graph,
-            store,
-            loaded_env,
-            fingerprint_key,
-        })
+        Ok(Self { workspace_root, config, graph, store, loaded_env, fingerprint_key })
     }
 
     pub fn graph(&self) -> &TaskGraph {
@@ -241,9 +229,7 @@ impl Executor {
         let _run_lock = if needs_lock {
             let sweep = sweep_runtime_state(&self.workspace_root, true)?;
             if sweep.active_lock_detected {
-                return Err(anyhow!(
-                    "another Broski execution is active; aborting startup sweep"
-                ));
+                return Err(anyhow!("another Broski execution is active; aborting startup sweep"));
             }
             Some(acquire_runtime_lock(&self.workspace_root)?)
         } else {
@@ -782,9 +768,7 @@ impl Executor {
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                 created_at: unix_timestamp_secs(),
-                duration_ms: task_total_duration(&timings)
-                    .as_millis()
-                    .min(u64::MAX as u128) as u64,
+                duration_ms: task_total_duration(&timings).as_millis().min(u64::MAX as u128) as u64,
             };
             self.store.save_execution(&record)?;
         }
@@ -927,13 +911,12 @@ impl Executor {
         // Capture mode: pipe stdout/stderr line-by-line so LogLine events can stream
         // to the caller's sink while the command is still running. The synthesized
         // Output preserves the existing return contract (status + raw bytes).
-        let sender = progress
-            .cloned()
-            .ok_or_else(|| anyhow!("capture_output requires an event_sink"))?;
+        let sender =
+            progress.cloned().ok_or_else(|| anyhow!("capture_output requires an event_sink"))?;
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn().with_context(|| {
-            format!("spawning task command '{}'", invocation.display_command)
-        })?;
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("spawning task command '{}'", invocation.display_command))?;
         let pid = child.id();
         if let Some(token) = &options.cancellation {
             token.register_child(pid);
@@ -950,18 +933,16 @@ impl Executor {
             spawn_log_capture(stdout, task_name.to_string(), LogStream::Stdout, sender.clone());
         let stderr_handle =
             spawn_log_capture(stderr, task_name.to_string(), LogStream::Stderr, sender);
-        let status = child.wait().with_context(|| {
-            format!("waiting on task command '{}'", invocation.display_command)
-        })?;
+        let status = child
+            .wait()
+            .with_context(|| format!("waiting on task command '{}'", invocation.display_command))?;
         if let Some(token) = &options.cancellation {
             token.unregister_child(pid);
         }
-        let stdout_bytes = stdout_handle
-            .join()
-            .map_err(|_| anyhow!("stdout capture thread panicked"))??;
-        let stderr_bytes = stderr_handle
-            .join()
-            .map_err(|_| anyhow!("stderr capture thread panicked"))??;
+        let stdout_bytes =
+            stdout_handle.join().map_err(|_| anyhow!("stdout capture thread panicked"))??;
+        let stderr_bytes =
+            stderr_handle.join().map_err(|_| anyhow!("stderr capture thread panicked"))??;
         Ok(Output { status, stdout: stdout_bytes, stderr: stderr_bytes })
     }
 
@@ -1272,10 +1253,7 @@ fn emit_phase(
     phase: TaskPhase,
     elapsed: Duration,
 ) {
-    emit_progress(
-        sender,
-        ProgressEvent::TaskPhase { task: task_name.to_string(), phase, elapsed },
-    );
+    emit_progress(sender, ProgressEvent::TaskPhase { task: task_name.to_string(), phase, elapsed });
 }
 
 /// Read a child stdio handle line-by-line, emitting each line as a `LogLine`
@@ -1304,7 +1282,8 @@ where
             }
             buf.extend_from_slice(line.as_bytes());
             let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
-            let _ = sender.send(ProgressEvent::LogLine { task: task.clone(), stream, line: trimmed });
+            let _ =
+                sender.send(ProgressEvent::LogLine { task: task.clone(), stream, line: trimmed });
         }
         Ok(buf)
     })
@@ -2762,9 +2741,7 @@ mod tests {
         out
     }
 
-    fn build_graph_workspace(
-        cmd: &str,
-    ) -> (tempfile::TempDir, BroskiFile, std::path::PathBuf) {
+    fn build_graph_workspace(cmd: &str) -> (tempfile::TempDir, BroskiFile, std::path::PathBuf) {
         let tmp = tempfile::tempdir().expect("temp dir");
         let workspace = tmp.path().join("workspace");
         fs::create_dir_all(workspace.join("src")).expect("src");
@@ -2884,11 +2861,8 @@ mod tests {
         let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
 
         let (tx, rx) = mpsc::channel::<ProgressEvent>();
-        let opts = RunOptions {
-            event_sink: Some(tx),
-            capture_output: true,
-            ..RunOptions::default()
-        };
+        let opts =
+            RunOptions { event_sink: Some(tx), capture_output: true, ..RunOptions::default() };
         executor.run_target("phase_task", &opts).expect("run ok");
         drop(opts);
 
@@ -2959,8 +2933,7 @@ mod tests {
         let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
 
         let (tx, rx) = mpsc::channel::<ProgressEvent>();
-        let opts =
-            RunOptions { event_sink: Some(tx), ..RunOptions::default() };
+        let opts = RunOptions { event_sink: Some(tx), ..RunOptions::default() };
         executor.run_target("solo", &opts).expect("solo runs");
         // Drop the executor's clone of the sender by dropping opts (it's our last reference here).
         drop(opts);

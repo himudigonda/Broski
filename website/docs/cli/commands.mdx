@@ -16,13 +16,15 @@ broski list
 broski graph <task> --format text|dot
 broski doctor [--repair|--no-repair]
 broski cache prune --max-size <MB>
+broski tui <task> [--theme <name>]
+broski history [<task>] [--limit <N>]
 ```
 
 ## Resolution rules
 
 1. Subcommands win over task names.
 2. Use `broski run <task>` when you want explicit task resolution.
-3. Reserved names are blocked as task names: `run`, `list`, `graph`, `doctor`, `cache`, `help`, `version`.
+3. Reserved names are blocked as task names: `run`, `list`, `graph`, `doctor`, `cache`, `help`, `version`, `tui`, `history`.
 
 ## Run behavior flags
 
@@ -37,6 +39,8 @@ These flags apply to `broski <task>` and `broski run <task>`.
 | `--watch` | off | Re-run target graph on input changes. | See [Watch Mode](./watch-mode). |
 | `--force-isolation` | off | Force strict isolation for graph tasks. | Not supported for interactive tasks. |
 | `--jobs <n>` | auto | Override worker concurrency. | Explicit run supports `--jobs <n>`. Implicit run supports `--jobs=<n>`. |
+| `--tui` | off | Render this run through the live TUI dashboard instead of the spinner output. | Mutually exclusive with `--dry-run`, `--explain`, and `--watch`. |
+| `--theme <name>` | `default` | Dashboard color palette (`default`, `dark`, `light`, `high-contrast`/`hc`). | Also honored via `BROSKI_THEME`. Only meaningful with `--tui` or `broski tui`. |
 
 ## Global flags
 
@@ -124,6 +128,37 @@ broski cache prune --max-size 512
 ```
 
 Output reports objects pruned, bytes freed, and remaining size.
+
+### `broski tui <task>` and `broski run <task> --tui`
+
+Render the run through a live `ratatui`-based dashboard:
+
+- DAG view with per-task state and ETA badges (sourced from the most recent successful execution).
+- Streaming log tail.
+- Summary bar with aggregate remaining-time and overall status.
+- Two-stage Ctrl-C: first press requests a soft cancel; a second press within two seconds escalates to a hard cancel (`SIGTERM` to all child PIDs) and exits.
+
+Theme selection:
+
+```bash
+broski tui ci --theme dark
+broski run ci --tui --theme high-contrast
+BROSKI_THEME=light broski tui ci
+```
+
+The dashboard is mutually exclusive with `--dry-run`, `--explain`, and `--watch` because those flags expect direct stdout output.
+
+### `broski history [<task>] [--limit <N>]`
+
+Read-only summary of recent successful runs from the artifact store.
+
+- `broski history` lists the most recent run per task (newest first), with relative time and duration.
+- `broski history <task> --limit N` lists the last N runs for a single task with absolute time, duration, and short fingerprint.
+
+```bash
+broski history
+broski history ci --limit 10
+```
 
 ## Explain output details
 

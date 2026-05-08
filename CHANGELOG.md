@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.0] - 2026-05-08
+
+### Added — Live TUI Dashboard
+- New `broski-tui` crate (built on `ratatui` + `crossterm`) renders a real-time dashboard with DAG state, log tail, summary, and help footer.
+- New `broski tui <task>` subcommand and a `--tui` flag on `broski run` route execution through the dashboard.
+- Named themes: `default`, `dark`, `light`, and `high-contrast` (alias `hc`), selectable via `--theme <name>` or `BROSKI_THEME`.
+- Live ETA estimates: the dashboard prefetches the most recent successful duration per task from the artifact store and shows per-task plus aggregate remaining-time badges.
+
+### Added — Streaming Executor Event API
+- `broski_core::ProgressEvent` is now a public, structured stream (`RunStarted`, `TaskQueued`, `TaskStarted`, `TaskPhase`, `LogLine`, `TaskFinished`, `RunFinished`).
+- `RunOptions` gains opt-in `event_sink: Option<Sender<ProgressEvent>>` and `capture_output: bool` for line-by-line stdout/stderr streaming on graph-mode tasks.
+- Per-phase timing events surface `ResolveInputs`, `Fingerprint`, `CacheRestore`, `StagePrep`, `CommandExec`, `OutputPromote`, and `CacheStore` boundaries.
+- CLI behavior is byte-identical when no sink is provided: the existing indicatif renderer keeps owning the TTY.
+
+### Added — Cooperative Cancellation
+- New `broski_core::CancellationToken` with `CancelLevel::Soft` and `CancelLevel::Hard` semantics. Soft flips a flag (executor refuses to start new tasks); Hard sends `SIGTERM` to all registered child PIDs.
+- TUI two-stage Ctrl-C: the first press requests a soft cancel, a second press within two seconds escalates to hard and exits. Status bar reflects `CANCELLING` → `TERMINATING` → `CANCELLED`.
+- `RunSummary` now carries a `skipped: Vec<String>` for tasks that were dequeued by cancellation.
+
+### Added — `broski history` Command
+- `broski history` lists the most recent successful execution per task (newest first, with relative-time and duration columns).
+- `broski history <task> --limit N` lists the last N runs for a single task with absolute-time, duration, and short-fingerprint columns.
+
+### Added — Versioned Cache Records
+- `ExecutionRecord` gains `duration_ms: u64`. SQLite migration adds the column with `DEFAULT 0` for existing rows; the field is `#[serde(default)]` for forward compat.
+- `ArtifactStore` trait gains `fetch_history(task: Option<&str>, limit: usize)` for the history command and the TUI ETA prefetch.
+
+### Fixed — Validator Version Drift
+- Replaced the hard-coded `"0.1" | … | "0.5"` allowlist with a derived ceiling from `CARGO_PKG_VERSION`. Broskifiles declaring `0.6` or `0.7` now validate cleanly against the v0.7.0 binary; future minor bumps are accepted without a validator edit.
+- Forward-incompatible declarations (e.g. `1.0` against a `0.7.x` binary) still fail with an actionable "upgrade broski" message.
+
+### Operational Notes
+- MSRV unchanged at **1.78.0**; all new code is verified clippy-clean against that floor.
+- Quality gate: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` all green (135 tests passing).
+- Two-terminal interactive concurrency regression guard (`v0.6` sprint) still passes.
+
 ## [0.6.1] - 2026-03-07
 
 ### Stabilization

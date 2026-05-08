@@ -176,11 +176,7 @@ impl ArtifactStore for LocalArtifactStore {
         Ok(())
     }
 
-    fn fetch_history(
-        &self,
-        task: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<ExecutionRecord>> {
+    fn fetch_history(&self, task: Option<&str>, limit: usize) -> Result<Vec<ExecutionRecord>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -217,8 +213,7 @@ impl ArtifactStore for LocalArtifactStore {
 
         let mut stmt = conn.prepare(&sql).context("preparing history query")?;
         let mut rows = if has_task_filter {
-            stmt.query(params![task.unwrap_or(""), cap_i64])
-                .context("querying scoped history")?
+            stmt.query(params![task.unwrap_or(""), cap_i64]).context("querying scoped history")?
         } else {
             stmt.query(params![cap_i64]).context("querying global history")?
         };

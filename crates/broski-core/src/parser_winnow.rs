@@ -1117,11 +1117,7 @@ fn validate_dsl_version(version: &str) -> Result<()> {
     let (pkg_major, pkg_minor) = parse_version_two_part(pkg)
         .ok_or_else(|| anyhow!("internal: pkg version '{}' unparsable", pkg))?;
     if major != pkg_major {
-        bail!(
-            "DSL broskifile requires version major {}; found '{}'",
-            pkg_major,
-            version
-        );
+        bail!("DSL broskifile requires version major {}; found '{}'", pkg_major, version);
     }
     if minor < DSL_MIN_MINOR {
         bail!(

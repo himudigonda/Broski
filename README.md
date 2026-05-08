@@ -2,7 +2,7 @@
 
 ![Broski Banner](website/static/img/branding/broski_banner.png)
 
-[![Version](https://img.shields.io/badge/version-v0.6.1-blue)](https://github.com/himudigonda/Broski/releases/tag/v0.6.1)
+[![Version](https://img.shields.io/badge/version-v0.7.0-blue)](https://github.com/himudigonda/Broski/releases/tag/v0.7.0)
 [![CI](https://img.shields.io/github/actions/workflow/status/himudigonda/Broski/ci.yml?branch=main&label=build)](https://github.com/himudigonda/Broski/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange)](https://www.rust-lang.org/)
@@ -51,6 +51,8 @@ Typical explain output:
 - `--explain` tells you exactly why a task reran.
 - Transactional output promotion avoids poisoned workspace state on failures.
 - Interactive and graph execution are both first-class (`@mode interactive` for long-running dev tasks, graph mode for cacheable artifact tasks).
+- Live TUI dashboard: `broski tui ci` (or `broski run ci --tui`) shows DAG state, log tail, ETA estimates, and Ctrl-C cooperative cancellation.
+- `broski history` and `broski history <task>` summarize recent runs straight from the artifact store.
 
 ## Who This Is For Right Now
 
@@ -74,7 +76,7 @@ broski --version
 Pinned install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.6.1 bash
+curl -fsSL https://raw.githubusercontent.com/himudigonda/Broski/main/install.sh | BROSKI_VERSION=v0.7.0 bash
 ```
 
 ## Docs Portal

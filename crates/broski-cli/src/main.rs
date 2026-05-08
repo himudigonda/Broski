@@ -246,14 +246,8 @@ fn run() -> Result<()> {
                 options.jobs = j.max(1);
             }
             let theme = resolve_theme(theme.as_deref())?;
-            let summary = broski_tui::run(
-                workspace.clone(),
-                config,
-                Arc::new(cache),
-                task,
-                options,
-                theme,
-            )?;
+            let summary =
+                broski_tui::run(workspace.clone(), config, Arc::new(cache), task, options, theme)?;
             if !summary.cache_hits.is_empty() {
                 println!("cache hits: {}", summary.cache_hits.join(", "));
             }
@@ -520,11 +514,7 @@ fn run_cache_command(workspace: &Path, command: CacheCommand) -> Result<()> {
     Ok(())
 }
 
-fn run_history_command(
-    workspace: &Path,
-    task: Option<String>,
-    limit: usize,
-) -> Result<()> {
+fn run_history_command(workspace: &Path, task: Option<String>, limit: usize) -> Result<()> {
     use broski_store::ArtifactStore;
     let store = LocalArtifactStore::new(cache_root(workspace))?;
     let rows = store.fetch_history(task.as_deref(), limit)?;
