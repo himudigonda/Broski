@@ -390,12 +390,10 @@ pub fn parse_broskifile_dsl_with_workspace(
     }
 
     let version = version.ok_or_else(|| {
-        parse_error(1, 1, "missing required top-level line: version = \"0.5\"".to_string())
+        parse_error(1, 1, "missing required top-level line: version = \"0.6\"".to_string())
     })?;
 
-    if version != "0.3" && version != "0.4" && version != "0.5" {
-        bail!("DSL broskifile requires version = \"0.3\", \"0.4\", or \"0.5\"; found '{version}'");
-    }
+    validate_dsl_version(&version)?;
 
     if tasks.is_empty() {
         bail!("broskifile must define at least one task");
@@ -1105,6 +1103,53 @@ fn read_limited_dynamic_output_stream<R: Read>(
     }
 
     Ok(LimitedDynamicOutput { bytes: output, exceeded_limit })
+}
+
+/// DSL syntax floor. The DSL was rewritten for 0.3; older formats are not
+/// understood by this parser. Upper bound is the running broski package version.
+const DSL_MIN_MINOR: u32 = 3;
+
+fn validate_dsl_version(version: &str) -> Result<()> {
+    let (major, minor) = parse_version_two_part(version).ok_or_else(|| {
+        anyhow!("malformed broskifile version '{}'; expected 'MAJOR.MINOR'", version)
+    })?;
+    let pkg = env!("CARGO_PKG_VERSION");
+    let (pkg_major, pkg_minor) = parse_version_two_part(pkg)
+        .ok_or_else(|| anyhow!("internal: pkg version '{}' unparsable", pkg))?;
+    if major != pkg_major {
+        bail!(
+            "DSL broskifile requires version major {}; found '{}'",
+            pkg_major,
+            version
+        );
+    }
+    if minor < DSL_MIN_MINOR {
+        bail!(
+            "DSL broskifile requires version >= {}.{}; found '{}'",
+            pkg_major,
+            DSL_MIN_MINOR,
+            version
+        );
+    }
+    if minor > pkg_minor {
+        bail!(
+            "DSL broskifile declares version '{}' but this binary is {}; upgrade broski",
+            version,
+            pkg
+        );
+    }
+    Ok(())
+}
+
+fn parse_version_two_part(raw: &str) -> Option<(u32, u32)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.splitn(3, '.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next()?.parse::<u32>().ok()?;
+    Some((major, minor))
 }
 
 fn parse_error(line: usize, column: usize, message: String) -> anyhow::Error {

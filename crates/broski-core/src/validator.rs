@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::graph::TaskGraph;
 use crate::model::{BroskiFile, TaskMode};
@@ -9,18 +9,43 @@ use crate::resolver::normalize_relative_path;
 pub const RESERVED_COMMAND_NAMES: &[&str] =
     &["run", "list", "graph", "doctor", "cache", "help", "version"];
 
-pub fn validate_broskifile(config: &BroskiFile, workspace_root: &Path) -> Result<()> {
-    if config.broski.version != "0.1"
-        && config.broski.version != "0.2"
-        && config.broski.version != "0.3"
-        && config.broski.version != "0.4"
-        && config.broski.version != "0.5"
-    {
-        return Err(anyhow!(
-            "unsupported broskifile version '{}'; expected '0.1', '0.2', '0.3', '0.4', or '0.5'",
-            config.broski.version
-        ));
+fn validate_version(declared: &str) -> Result<()> {
+    let (declared_major, declared_minor) = parse_two_part(declared).ok_or_else(|| {
+        anyhow!("malformed broskifile version '{}'; expected 'MAJOR.MINOR'", declared)
+    })?;
+    let pkg = env!("CARGO_PKG_VERSION");
+    let (pkg_major, pkg_minor) =
+        parse_two_part(pkg).ok_or_else(|| anyhow!("internal: pkg version '{}' unparsable", pkg))?;
+    if declared_major != pkg_major {
+        bail!(
+            "broskifile version '{}' incompatible with broski {} (major mismatch)",
+            declared,
+            pkg
+        );
     }
+    if declared_minor > pkg_minor {
+        bail!(
+            "broskifile declares version '{}' but this binary is {}; upgrade broski",
+            declared,
+            pkg
+        );
+    }
+    Ok(())
+}
+
+fn parse_two_part(raw: &str) -> Option<(u32, u32)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parts = trimmed.splitn(3, '.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next()?.parse::<u32>().ok()?;
+    Some((major, minor))
+}
+
+pub fn validate_broskifile(config: &BroskiFile, workspace_root: &Path) -> Result<()> {
+    validate_version(&config.broski.version)?;
 
     if config.task.is_empty() {
         return Err(anyhow!("broskifile must define at least one task"));
@@ -301,5 +326,74 @@ mod tests {
 
         let error = validate_broskifile(&config, tmp.path()).expect_err("should fail");
         assert!(error.to_string().contains("overlaps output"));
+    }
+
+    fn pkg_two_part() -> (u32, u32) {
+        super::parse_two_part(env!("CARGO_PKG_VERSION")).expect("pkg version parses")
+    }
+
+    #[test]
+    fn accepts_current_pkg_minor() {
+        let (major, minor) = pkg_two_part();
+        let declared = format!("{}.{}", major, minor);
+        super::validate_version(&declared).expect("current pkg minor must validate");
+    }
+
+    #[test]
+    fn accepts_older_minor() {
+        let (major, minor) = pkg_two_part();
+        for older in 0..minor {
+            let declared = format!("{}.{}", major, older);
+            super::validate_version(&declared)
+                .unwrap_or_else(|err| panic!("{} should validate: {}", declared, err));
+        }
+    }
+
+    #[test]
+    fn rejects_future_minor() {
+        let (major, _minor) = pkg_two_part();
+        let declared = format!("{}.99", major);
+        let error =
+            super::validate_version(&declared).expect_err("future minor must be rejected");
+        assert!(
+            error.to_string().contains("upgrade broski"),
+            "unexpected error: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn rejects_future_major() {
+        let (major, _minor) = pkg_two_part();
+        let declared = format!("{}.0", major + 1);
+        let error =
+            super::validate_version(&declared).expect_err("future major must be rejected");
+        assert!(
+            error.to_string().contains("major mismatch"),
+            "unexpected error: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn rejects_malformed() {
+        for bad in ["", "0", "abc", "0.x", "0..", ".."] {
+            let error = super::validate_version(bad)
+                .err()
+                .unwrap_or_else(|| panic!("expected '{}' to be malformed", bad));
+            assert!(
+                error.to_string().contains("malformed"),
+                "unexpected error for '{}': {}",
+                bad,
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_three_part_silently_ignoring_patch() {
+        let pkg = env!("CARGO_PKG_VERSION");
+        super::validate_version(pkg)
+            .unwrap_or_else(|err| panic!("'{}' should validate: {}", pkg, err));
     }
 }
