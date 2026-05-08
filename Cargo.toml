@@ -4,6 +4,7 @@ members = [
   "crates/broski-core",
   "crates/broski-cache",
   "crates/broski-store",
+  "crates/broski-tui",
 ]
 resolver = "2"
 
@@ -16,6 +17,8 @@ repository = "https://github.com/himudigonda/Broski"
 
 [workspace.dependencies]
 aho-corasick = "1.1"
+crossterm = "0.28"
+ratatui = "0.29"
 anyhow = "1.0"
 blake3 = "1.8"
 clap = { version = "4.5", features = ["derive"] }

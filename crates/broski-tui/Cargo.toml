@@ -1,0 +1,16 @@
+[package]
+name = "broski-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+broski-core = { path = "../broski-core" }
+broski-store = { path = "../broski-store" }
+
+[dev-dependencies]
+tempfile.workspace = true
+broski-cache = { path = "../broski-cache" }
