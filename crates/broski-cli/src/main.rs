@@ -67,6 +67,15 @@ enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
+    /// Show recent task execution history from the artifact store.
+    History {
+        /// Optional task to scope to. When omitted, prints the most recent
+        /// run per known task (one row per task).
+        task: Option<String>,
+        /// Maximum number of rows to print.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     /// Launch the live ratatui dashboard for a task.
     Tui {
         task: String,
@@ -131,6 +140,7 @@ fn run() -> Result<()> {
         }
         Some(Command::Doctor { repair, no_repair }) => run_doctor(&workspace, repair || !no_repair),
         Some(Command::Cache { command }) => run_cache_command(&workspace, command),
+        Some(Command::History { task, limit }) => run_history_command(&workspace, task, limit),
         Some(Command::List) => {
             let config = load_and_validate(&workspace)?;
             let graph = TaskGraph::build(&config.task)?;
@@ -508,6 +518,93 @@ fn run_cache_command(workspace: &Path, command: CacheCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_history_command(
+    workspace: &Path,
+    task: Option<String>,
+    limit: usize,
+) -> Result<()> {
+    use broski_store::ArtifactStore;
+    let store = LocalArtifactStore::new(cache_root(workspace))?;
+    let rows = store.fetch_history(task.as_deref(), limit)?;
+    if rows.is_empty() {
+        println!("(no history)");
+        return Ok(());
+    }
+    if task.is_some() {
+        let header_when = "WHEN";
+        let header_duration = "DURATION";
+        let header_fp = "FINGERPRINT";
+        println!("{header_when:<24} {header_duration:>10}  {header_fp}");
+        for r in rows {
+            let when = format_unix_ts(r.created_at);
+            let dur = format_duration_ms(r.duration_ms);
+            let fp = short_fingerprint(&r.fingerprint);
+            println!("{when:<24} {dur:>10}  {fp}");
+        }
+    } else {
+        let header_task = "TASK";
+        let header_when = "LAST RUN";
+        let header_duration = "DURATION";
+        println!("{header_task:<32} {header_when:<24} {header_duration:>10}");
+        for r in rows {
+            let task = r.task_name;
+            let when = format_unix_ts(r.created_at);
+            let dur = format_duration_ms(r.duration_ms);
+            println!("{task:<32} {when:<24} {dur:>10}");
+        }
+    }
+    Ok(())
+}
+
+fn format_unix_ts(unix_secs: i64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    if unix_secs <= 0 {
+        return "?".to_string();
+    }
+    let when = UNIX_EPOCH + Duration::from_secs(unix_secs as u64);
+    let now = std::time::SystemTime::now();
+    match now.duration_since(when) {
+        Ok(elapsed) => format_relative(elapsed),
+        Err(_) => format!("ts:{}", unix_secs), // future timestamp; clock skew
+    }
+}
+
+fn format_relative(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    if ms == 0 {
+        return "?".to_string();
+    }
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        let m = ms / 60_000;
+        let s = (ms % 60_000) / 1000;
+        format!("{}m{:02}s", m, s)
+    }
+}
+
+fn short_fingerprint(fp: &str) -> String {
+    if fp.len() <= 12 {
+        fp.to_string()
+    } else {
+        format!("{}…", &fp[..12])
+    }
 }
 
 fn resolve_theme(flag: Option<&str>) -> Result<broski_tui::Theme> {

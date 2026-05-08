@@ -176,6 +176,82 @@ impl ArtifactStore for LocalArtifactStore {
         Ok(())
     }
 
+    fn fetch_history(
+        &self,
+        task: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ExecutionRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connection()?;
+        let cap_i64: i64 = limit.try_into().unwrap_or(i64::MAX);
+
+        let (sql, has_task_filter) = match task {
+            Some(_) => (
+                "SELECT task_name, fingerprint, manifest_json, artifacts_json, stdout, stderr, created_at, duration_ms
+                 FROM executions
+                 WHERE task_name = ?1
+                 ORDER BY created_at DESC
+                 LIMIT ?2"
+                    .to_string(),
+                true,
+            ),
+            None => (
+                // One row per task: the most recent execution per task_name.
+                "SELECT e.task_name, e.fingerprint, e.manifest_json, e.artifacts_json,
+                        e.stdout, e.stderr, e.created_at, e.duration_ms
+                 FROM executions e
+                 INNER JOIN (
+                     SELECT task_name, MAX(created_at) AS max_created
+                     FROM executions
+                     GROUP BY task_name
+                 ) latest
+                 ON latest.task_name = e.task_name AND latest.max_created = e.created_at
+                 ORDER BY e.created_at DESC
+                 LIMIT ?1"
+                    .to_string(),
+                false,
+            ),
+        };
+
+        let mut stmt = conn.prepare(&sql).context("preparing history query")?;
+        let mut rows = if has_task_filter {
+            stmt.query(params![task.unwrap_or(""), cap_i64])
+                .context("querying scoped history")?
+        } else {
+            stmt.query(params![cap_i64]).context("querying global history")?
+        };
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().context("reading history row")? {
+            let task_name: String = row.get(0).context("reading history task_name")?;
+            let fingerprint: String = row.get(1).context("reading history fingerprint")?;
+            let manifest_json: String = row.get(2).context("reading history manifest_json")?;
+            let manifest: BTreeMap<String, String> = serde_json::from_str(&manifest_json)
+                .context("deserializing history manifest_json")?;
+            let artifacts_json: String = row.get(3).context("reading history artifacts_json")?;
+            let artifacts: Vec<CachedArtifact> = serde_json::from_str(&artifacts_json)
+                .context("deserializing history artifacts_json")?;
+            let stdout: String = row.get(4).context("reading history stdout")?;
+            let stderr: String = row.get(5).context("reading history stderr")?;
+            let created_at: i64 = row.get(6).context("reading history created_at")?;
+            let duration_ms: i64 = row.get(7).context("reading history duration_ms")?;
+
+            out.push(ExecutionRecord {
+                task_name,
+                fingerprint,
+                manifest,
+                artifacts,
+                stdout,
+                stderr,
+                created_at,
+                duration_ms: duration_ms.max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
     fn store_artifacts(
         &self,
         workspace: &Path,
@@ -605,6 +681,81 @@ mod tests {
         assert_eq!(latest.stdout, "new");
         assert_eq!(latest.manifest.get("task:run"), Some(&"new".to_string()));
         assert_eq!(latest.duration_ms, 2200);
+    }
+
+    fn record(task: &str, fingerprint: &str, created_at: i64, duration_ms: u64) -> ExecutionRecord {
+        ExecutionRecord {
+            task_name: task.to_string(),
+            fingerprint: fingerprint.to_string(),
+            manifest: BTreeMap::new(),
+            artifacts: vec![],
+            stdout: "".to_string(),
+            stderr: "".to_string(),
+            created_at,
+            duration_ms,
+        }
+    }
+
+    #[test]
+    fn fetch_history_scoped_to_task_returns_newest_first() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("store");
+        for (i, ts) in [(1, 100), (2, 200), (3, 300), (4, 400)].iter().enumerate() {
+            store
+                .save_execution(&record("build", &format!("fp-{}", i), ts.1, 1000 + i as u64))
+                .expect("save");
+        }
+        store.save_execution(&record("test", "fp-other", 500, 9999)).expect("save other");
+
+        let rows = store.fetch_history(Some("build"), 3).expect("history");
+        assert_eq!(rows.len(), 3, "limit honored");
+        let timestamps: Vec<i64> = rows.iter().map(|r| r.created_at).collect();
+        assert_eq!(timestamps, vec![400, 300, 200], "newest first");
+        for r in &rows {
+            assert_eq!(r.task_name, "build", "scoped to requested task");
+        }
+    }
+
+    #[test]
+    fn fetch_history_scoped_returns_empty_for_unknown_task() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("store");
+        store.save_execution(&record("build", "fp-1", 100, 1000)).expect("save");
+
+        let rows = store.fetch_history(Some("never_ran"), 10).expect("history");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn fetch_history_global_returns_one_row_per_task_latest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("store");
+        // build: two rows, latest at ts=300
+        store.save_execution(&record("build", "b-1", 100, 500)).expect("save");
+        store.save_execution(&record("build", "b-2", 300, 700)).expect("save");
+        // test: one row at ts=200
+        store.save_execution(&record("test", "t-1", 200, 1500)).expect("save");
+        // ci: one row at ts=400
+        store.save_execution(&record("ci", "c-1", 400, 2500)).expect("save");
+
+        let rows = store.fetch_history(None, 100).expect("history");
+        assert_eq!(rows.len(), 3, "one row per task");
+
+        let by_name: std::collections::HashMap<String, ExecutionRecord> =
+            rows.into_iter().map(|r| (r.task_name.clone(), r)).collect();
+        assert_eq!(by_name.get("build").unwrap().created_at, 300);
+        assert_eq!(by_name.get("build").unwrap().fingerprint, "b-2");
+        assert_eq!(by_name.get("test").unwrap().created_at, 200);
+        assert_eq!(by_name.get("ci").unwrap().created_at, 400);
+    }
+
+    #[test]
+    fn fetch_history_with_zero_limit_returns_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("store");
+        store.save_execution(&record("build", "fp", 1, 1)).expect("save");
+        assert!(store.fetch_history(Some("build"), 0).expect("history").is_empty());
+        assert!(store.fetch_history(None, 0).expect("history").is_empty());
     }
 
     #[test]
