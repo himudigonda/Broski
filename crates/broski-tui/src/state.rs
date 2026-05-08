@@ -54,6 +54,19 @@ impl Default for TaskInfo {
 /// Per-task ring buffer cap. Older lines are dropped with a sentinel marker.
 pub const LOG_CAPACITY: usize = 4096;
 
+/// User-driven cancellation state, advanced by the two-stage Ctrl-C handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CancelState {
+    #[default]
+    Idle,
+    /// First Ctrl-C received: pending tasks will be skipped, in-flight
+    /// children are left alone.
+    Soft,
+    /// Second Ctrl-C received within the cancellation window: in-flight
+    /// children have been signaled.
+    Hard,
+}
+
 /// Full TUI state.
 #[derive(Debug, Default, Clone)]
 pub struct TuiState {
@@ -77,6 +90,8 @@ pub struct TuiState {
     /// Estimated duration per task, prefetched from the artifact-store
     /// history before the run starts. Empty when no history exists yet.
     pub etas: BTreeMap<String, Duration>,
+    /// Two-stage cancellation state, advanced by the app's Ctrl-C handler.
+    pub cancel: CancelState,
 }
 
 impl TuiState {

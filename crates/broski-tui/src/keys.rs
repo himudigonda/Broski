@@ -5,7 +5,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    /// Plain quit. Exits without cancelling the executor.
     Quit,
+    /// User pressed Ctrl-C. The app loop interprets this as a soft cancel
+    /// on first press and a hard cancel + quit on a second press within
+    /// the cancellation window.
+    Interrupt,
     SelectNext,
     SelectPrev,
     SelectFirst,
@@ -19,7 +24,7 @@ pub fn map_key(event: KeyEvent) -> Action {
     let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
     match event.code {
         KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => Action::Quit,
-        KeyCode::Char('c') if ctrl => Action::Quit,
+        KeyCode::Char('c') if ctrl => Action::Interrupt,
         KeyCode::Char('c') => Action::ClearLogs,
         KeyCode::Char('r') | KeyCode::Char('R') => Action::Redraw,
         KeyCode::Down | KeyCode::Char('j') => Action::SelectNext,
@@ -58,9 +63,16 @@ mod tests {
         assert_eq!(map_key(key(KeyCode::Char('q'))), Action::Quit);
         assert_eq!(map_key(key(KeyCode::Char('Q'))), Action::Quit);
         assert_eq!(map_key(key(KeyCode::Esc)), Action::Quit);
+    }
+
+    #[test]
+    fn ctrl_c_is_interrupt_not_quit() {
+        // The app loop interprets Interrupt as soft cancel on first press,
+        // hard cancel on second. Plain `q` still terminates without
+        // touching the executor.
         assert_eq!(
             map_key(key_with_mods(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Action::Quit
+            Action::Interrupt
         );
     }
 

@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use broski_core::cancel::{CancelLevel, CancellationToken};
 use broski_core::{BroskiFile, Executor, ProgressEvent, RunOptions, RunSummary, TaskGraph};
 use broski_store::ArtifactStore;
 use crossterm::event::{self, Event};
@@ -28,7 +29,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Terminal;
 
 use crate::keys::{map_key, Action};
-use crate::state::TuiState;
+use crate::state::{CancelState, TuiState};
 use crate::theme::{Palette, Theme};
 use crate::widgets::dag::DagWidget;
 use crate::widgets::help::HelpFooter;
@@ -38,6 +39,9 @@ use crate::widgets::summary::SummaryWidget;
 /// Foreground poll cadence. Keys come in via `event::poll` so this also
 /// caps the redraw rate when no events are arriving.
 const TICK_MS: u64 = 75;
+
+/// Window during which a second Ctrl-C escalates from soft to hard cancel.
+const CANCEL_WINDOW: Duration = Duration::from_secs(2);
 
 /// Launch the TUI for a given target. Blocks until the user quits.
 ///
@@ -55,8 +59,10 @@ pub fn run(
     let etas = prefetch_etas(&config, &target, store.as_ref());
 
     let (event_tx, event_rx) = mpsc::channel::<ProgressEvent>();
+    let cancellation = CancellationToken::new();
     base_options.event_sink = Some(event_tx);
     base_options.capture_output = true;
+    base_options.cancellation = Some(cancellation.clone());
 
     let executor_workspace = workspace.clone();
     let executor_target = target.clone();
@@ -69,7 +75,7 @@ pub fn run(
 
     let mut terminal = enter_terminal().context("entering alt screen / raw mode")?;
     let palette = theme.palette();
-    let result = drive_loop(&mut terminal, event_rx, &palette, etas);
+    let result = drive_loop(&mut terminal, event_rx, &palette, etas, &cancellation);
     let _ = leave_terminal(&mut terminal);
 
     let summary = executor_handle
@@ -116,10 +122,12 @@ fn drive_loop(
     event_rx: mpsc::Receiver<ProgressEvent>,
     palette: &Palette,
     etas: BTreeMap<String, Duration>,
+    cancellation: &CancellationToken,
 ) -> Result<()> {
     let mut state = TuiState::with_etas(etas);
     let mut dirty = true;
     let mut channel_open = true;
+    let mut last_interrupt: Option<Instant> = None;
     let tick = Duration::from_millis(TICK_MS);
 
     loop {
@@ -128,13 +136,12 @@ fn drive_loop(
             dirty = false;
         }
 
-        let poll_started = Instant::now();
         let has_input = event::poll(tick).context("polling terminal events")?;
         if has_input {
             match event::read().context("reading terminal event")? {
                 Event::Key(key) => {
                     let action = map_key(key);
-                    if apply_action(&mut state, action) {
+                    if apply_action(&mut state, action, cancellation, &mut last_interrupt) {
                         return Ok(());
                     }
                     dirty = true;
@@ -149,13 +156,8 @@ fn drive_loop(
             loop {
                 match event_rx.try_recv() {
                     Ok(ev) => {
-                        let was_run_finished =
-                            matches!(ev, ProgressEvent::RunFinished);
                         state.apply(ev);
                         dirty = true;
-                        if was_run_finished {
-                            // Stay in TUI so user can inspect; channel may close shortly.
-                        }
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
@@ -165,17 +167,54 @@ fn drive_loop(
                 }
             }
         }
+    }
+}
 
-        // If the user has nothing to do and the run is over, redraw budget is
-        // bounded by the tick so we don't busy-loop.
-        let _ = poll_started; // suppress unused warning when no input arrived
+/// Two-stage Ctrl-C handler. Returns the next `CancelState` plus whether the
+/// app loop should terminate. Pure: easy to unit-test without a terminal.
+pub(crate) fn next_interrupt_state(
+    current: CancelState,
+    last_press: Option<Instant>,
+    now: Instant,
+    window: Duration,
+) -> (CancelState, bool) {
+    match current {
+        CancelState::Idle => (CancelState::Soft, false),
+        CancelState::Soft => {
+            let within_window = last_press.is_some_and(|t| now.duration_since(t) <= window);
+            if within_window {
+                (CancelState::Hard, true)
+            } else {
+                // The first press timed out; treat this one as a fresh first.
+                (CancelState::Soft, false)
+            }
+        }
+        CancelState::Hard => (CancelState::Hard, true),
     }
 }
 
 /// Returns true if the action should terminate the loop.
-fn apply_action(state: &mut TuiState, action: Action) -> bool {
+fn apply_action(
+    state: &mut TuiState,
+    action: Action,
+    cancellation: &CancellationToken,
+    last_interrupt: &mut Option<Instant>,
+) -> bool {
     match action {
         Action::Quit => true,
+        Action::Interrupt => {
+            let now = Instant::now();
+            let (next, should_quit) =
+                next_interrupt_state(state.cancel, *last_interrupt, now, CANCEL_WINDOW);
+            state.cancel = next;
+            *last_interrupt = Some(now);
+            match next {
+                CancelState::Soft => cancellation.cancel(CancelLevel::Soft),
+                CancelState::Hard => cancellation.cancel(CancelLevel::Hard),
+                CancelState::Idle => {}
+            }
+            should_quit
+        }
         Action::SelectNext => {
             state.move_selection(1);
             false
@@ -248,4 +287,50 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_interrupt_goes_soft_without_quitting() {
+        let now = Instant::now();
+        let (next, quit) = next_interrupt_state(CancelState::Idle, None, now, CANCEL_WINDOW);
+        assert_eq!(next, CancelState::Soft);
+        assert!(!quit);
+    }
+
+    #[test]
+    fn second_interrupt_within_window_escalates_to_hard_and_quits() {
+        let first = Instant::now();
+        let second = first + Duration::from_millis(500);
+        let (next, quit) =
+            next_interrupt_state(CancelState::Soft, Some(first), second, CANCEL_WINDOW);
+        assert_eq!(next, CancelState::Hard);
+        assert!(quit);
+    }
+
+    #[test]
+    fn second_interrupt_after_window_resets_to_soft() {
+        let first = Instant::now();
+        let second = first + Duration::from_secs(10);
+        let (next, quit) =
+            next_interrupt_state(CancelState::Soft, Some(first), second, CANCEL_WINDOW);
+        assert_eq!(next, CancelState::Soft);
+        assert!(!quit);
+    }
+
+    #[test]
+    fn third_interrupt_after_hard_keeps_hard_and_quits() {
+        let now = Instant::now();
+        let (next, quit) = next_interrupt_state(
+            CancelState::Hard,
+            Some(now - Duration::from_millis(100)),
+            now,
+            CANCEL_WINDOW,
+        );
+        assert_eq!(next, CancelState::Hard);
+        assert!(quit);
+    }
 }

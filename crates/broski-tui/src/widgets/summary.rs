@@ -8,7 +8,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
-use crate::state::TuiState;
+use crate::state::{CancelState, TuiState};
 use crate::theme::Palette;
 
 pub struct SummaryWidget<'s> {
@@ -36,15 +36,18 @@ impl Widget for SummaryWidget<'_> {
             .saturating_sub(failed);
 
         let (status_text, status_color) = if self.state.run_finished {
-            if failed > 0 {
-                ("FAILED", self.palette.failed)
-            } else {
-                ("DONE", self.palette.done)
+            match self.state.cancel {
+                CancelState::Soft | CancelState::Hard => ("CANCELLED", self.palette.failed),
+                CancelState::Idle if failed > 0 => ("FAILED", self.palette.failed),
+                CancelState::Idle => ("DONE", self.palette.done),
             }
-        } else if running > 0 {
-            ("RUNNING", self.palette.running)
         } else {
-            ("IDLE", self.palette.help)
+            match self.state.cancel {
+                CancelState::Hard => ("TERMINATING", self.palette.failed),
+                CancelState::Soft => ("CANCELLING", self.palette.running),
+                CancelState::Idle if running > 0 => ("RUNNING", self.palette.running),
+                CancelState::Idle => ("IDLE", self.palette.help),
+            }
         };
 
         let mut spans = vec![

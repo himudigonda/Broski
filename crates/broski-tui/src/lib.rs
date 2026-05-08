@@ -15,5 +15,5 @@ pub mod widgets;
 mod app;
 
 pub use app::run;
-pub use state::{LogLineRecord, TaskState, TuiState};
+pub use state::{CancelState, LogLineRecord, TaskState, TuiState};
 pub use theme::{Palette, Theme};
