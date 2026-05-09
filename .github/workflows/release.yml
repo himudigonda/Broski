@@ -72,6 +72,9 @@ jobs:
     needs: build
 
     steps:
+      - name: Checkout (for CHANGELOG)
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -85,6 +88,27 @@ jobs:
           cd dist
           sha256sum broski-* > SHA256SUMS.txt
 
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          awk -v v="$version" '
+            BEGIN { in_section = 0 }
+            /^## \[/ {
+              if (in_section) { exit }
+              if ($0 ~ "\\[" v "\\]") { in_section = 1; print; next }
+            }
+            in_section { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "release ${RELEASE_TAG}" > release-notes.md
+            echo "" >> release-notes.md
+            echo "_No CHANGELOG entry found for ${version}; see commit history for details._" >> release-notes.md
+          fi
+          echo "--- release notes preview ---"
+          head -40 release-notes.md
+
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
@@ -94,6 +118,7 @@ jobs:
           draft: false
           prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           fail_on_unmatched_files: true
+          body_path: release-notes.md
           files: |
             dist/broski-*
             dist/SHA256SUMS.txt
