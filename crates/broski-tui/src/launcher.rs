@@ -10,9 +10,50 @@
 //! events ([`LauncherAction`]) into a new state plus an outward
 //! [`LauncherDecision`] that the app loop acts on.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
+use broski_store::StoreStats;
+
 use crate::theme::Theme;
+
+/// Static metadata about a single task, prepared once by the app loop and
+/// rendered in the launcher's stats panel when that task is highlighted.
+/// Read-only from the launcher's perspective — refreshes happen via
+/// [`LauncherCtx::refresh_task_meta`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskMeta {
+    pub description: Option<String>,
+    pub deps: Vec<String>,
+    pub inputs_count: usize,
+    pub outputs_count: usize,
+    /// Seconds since the most recent successful run of this task, if any.
+    pub last_run_ago_secs: Option<i64>,
+    /// Duration of the most recent successful run, if any.
+    pub last_duration_ms: Option<u64>,
+}
+
+/// Per-frame contextual data the launcher widget reads in addition to
+/// [`LauncherState`]. Owned and refreshed by the app loop.
+#[derive(Debug, Clone)]
+pub struct LauncherCtx {
+    pub workspace_display: String,
+    pub version: &'static str,
+    pub git_rev: Option<String>,
+    /// Concrete theme currently in use, e.g. "dark".
+    pub theme_resolved_name: String,
+    /// User's requested theme when it differs from the resolved name (e.g.
+    /// "auto" → "dark"). `None` when there's no resolution to disclose.
+    pub theme_requested_name: Option<String>,
+    pub cache_stats: StoreStats,
+    pub task_meta: BTreeMap<String, TaskMeta>,
+}
+
+impl LauncherCtx {
+    pub fn meta_for(&self, task: &str) -> Option<&TaskMeta> {
+        self.task_meta.get(task)
+    }
+}
 
 /// Result of folding an action into the launcher state.
 #[derive(Debug, Clone, PartialEq, Eq)]

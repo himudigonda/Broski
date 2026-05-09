@@ -32,7 +32,10 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Terminal;
 
 use crate::keys::{map_key, Action};
-use crate::launcher::{LauncherAction, LauncherDecision, LauncherState, ParsedCommand, RunOutcome};
+use crate::launcher::{
+    LauncherAction, LauncherCtx, LauncherDecision, LauncherState, ParsedCommand, RunOutcome,
+    TaskMeta,
+};
 use crate::state::{CancelState, TuiState};
 use crate::theme::{Palette, Theme};
 use crate::widgets::dag::DagWidget;
@@ -101,18 +104,28 @@ fn drive_launcher(
     base_options: &RunOptions,
     theme: Theme,
 ) -> Result<()> {
-    let mut current_theme = theme;
+    // The user's *requested* theme (e.g. Auto). Stays put across live
+    // switches — we only update the resolved theme/palette below.
+    let requested_theme = theme;
+    let mut current_theme = theme.resolved();
     let mut palette = current_theme.palette();
     let workspace_display = workspace.display().to_string();
     let mut current_config = config.clone();
     let mut launcher = LauncherState::new(visible_task_names(&current_config));
+    let mut ctx = build_launcher_ctx(
+        workspace,
+        &workspace_display,
+        &current_config,
+        store.as_ref(),
+        requested_theme,
+        current_theme,
+    );
     let tick = Duration::from_millis(TICK_MS);
     let mut dirty = true;
 
     loop {
         if dirty {
-            let theme_name = current_theme.name().to_string();
-            redraw_launcher(terminal, &launcher, &palette, &workspace_display, &theme_name)?;
+            redraw_launcher(terminal, &launcher, &ctx, &palette)?;
             dirty = false;
         }
 
@@ -141,15 +154,32 @@ fn drive_launcher(
                             Err(_) => RunOutcome::Failed,
                         };
                         launcher.record_run(cmd.target, outcome, started.elapsed());
+                        // Refresh task_meta + cache_stats: a successful
+                        // run wrote a new ExecutionRecord and may have
+                        // grown the cache.
+                        ctx = build_launcher_ctx(
+                            workspace,
+                            &workspace_display,
+                            &current_config,
+                            store.as_ref(),
+                            requested_theme,
+                            current_theme,
+                        );
                         dirty = true;
                     }
                     LauncherDecision::SwitchTheme(requested) => {
-                        // `Auto` is resolved here because we already own
-                        // the terminal — terminal-light handles raw-mode
-                        // toggling internally for the OSC 11 round-trip.
+                        // Resolved live: terminal-light toggles raw mode
+                        // internally for the OSC 11 round-trip, so this
+                        // is safe even mid-session.
                         let resolved = requested.resolved();
                         current_theme = resolved;
                         palette = resolved.palette();
+                        ctx.theme_resolved_name = resolved.name().to_string();
+                        ctx.theme_requested_name = if requested == resolved {
+                            None
+                        } else {
+                            Some(requested.name().to_string())
+                        };
                         launcher.record_status(format!(
                             "theme: {} (was {})",
                             resolved.name(),
@@ -162,6 +192,14 @@ fn drive_launcher(
                             Ok(reloaded) => {
                                 current_config = reloaded;
                                 launcher.replace_tasks(visible_task_names(&current_config));
+                                ctx = build_launcher_ctx(
+                                    workspace,
+                                    &workspace_display,
+                                    &current_config,
+                                    store.as_ref(),
+                                    requested_theme,
+                                    current_theme,
+                                );
                                 launcher.record_status("reloaded broskifile");
                             }
                             Err(err) => {
@@ -180,6 +218,9 @@ fn drive_launcher(
                                     mb_freed,
                                     report.remaining_bytes / (1024 * 1024),
                                 ));
+                                if let Ok(stats) = store.stats() {
+                                    ctx.cache_stats = stats;
+                                }
                             }
                             Err(err) => {
                                 launcher.record_status(format!("prune failed: {err}"));
@@ -213,6 +254,78 @@ fn options_with_passthrough(base: &RunOptions, cmd: &ParsedCommand) -> RunOption
 
 fn visible_task_names(config: &BroskiFile) -> Vec<String> {
     config.task.iter().filter(|(_, spec)| !spec.private).map(|(name, _)| name.clone()).collect()
+}
+
+/// Snapshot the contextual data the launcher renders alongside the live
+/// state. `requested` is what the user asked for (e.g. `Theme::Auto`);
+/// `resolved` is what we ended up using.
+fn build_launcher_ctx(
+    workspace: &Path,
+    workspace_display: &str,
+    config: &BroskiFile,
+    store: &dyn ArtifactStore,
+    requested: Theme,
+    resolved: Theme,
+) -> LauncherCtx {
+    use std::collections::BTreeMap;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut task_meta = BTreeMap::new();
+    for (name, spec) in &config.task {
+        if spec.private {
+            continue;
+        }
+        let mut meta = TaskMeta {
+            description: spec.description.clone(),
+            deps: spec.deps.clone(),
+            inputs_count: spec.inputs.len(),
+            outputs_count: spec.outputs.len(),
+            ..TaskMeta::default()
+        };
+        if let Ok(Some(record)) = store.fetch_latest_execution(name) {
+            if record.duration_ms > 0 {
+                meta.last_duration_ms = Some(record.duration_ms);
+            }
+            meta.last_run_ago_secs = Some(now_secs.saturating_sub(record.created_at));
+        }
+        task_meta.insert(name.clone(), meta);
+    }
+    let cache_stats = store.stats().unwrap_or_default();
+    LauncherCtx {
+        workspace_display: workspace_display.to_string(),
+        version: env!("CARGO_PKG_VERSION"),
+        git_rev: git_short_rev(workspace),
+        theme_resolved_name: resolved.name().to_string(),
+        theme_requested_name: if requested == resolved {
+            None
+        } else {
+            Some(requested.name().to_string())
+        },
+        cache_stats,
+        task_meta,
+    }
+}
+
+/// Best-effort short git SHA. Returns `None` when the workspace is not a
+/// git repo, when git isn't installed, or when the command otherwise
+/// fails. Never panics, never blocks longer than `git rev-parse` itself.
+fn git_short_rev(workspace: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let rev = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if rev.is_empty() {
+        None
+    } else {
+        Some(rev)
+    }
 }
 
 /// Run a single target inside an already-active raw-mode terminal. Returns
@@ -448,14 +561,13 @@ pub(crate) fn map_launcher_key(key: KeyEvent) -> LauncherAction {
 fn redraw_launcher(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &LauncherState,
+    ctx: &LauncherCtx,
     palette: &Palette,
-    workspace: &str,
-    theme_name: &str,
 ) -> Result<()> {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            frame.render_widget(LauncherWidget::new(state, palette, workspace, theme_name), area);
+            LauncherWidget::new(state, ctx, palette).render_into(frame, area);
         })
         .context("drawing launcher frame")?;
     Ok(())
