@@ -41,6 +41,16 @@ pub struct PruneReport {
     pub remaining_bytes: u64,
 }
 
+/// Snapshot of the cache's on-disk footprint. Surfaced by the TUI launcher
+/// as "N objects · X MB" without needing a prune. Walking the objects dir
+/// is O(N) on cache size, so callers fetch this once at startup and refresh
+/// after `/cache prune` or `/refresh`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoreStats {
+    pub object_count: usize,
+    pub total_bytes: u64,
+}
+
 pub trait ArtifactStore: Send + Sync {
     fn fetch_execution(
         &self,
@@ -57,4 +67,9 @@ pub trait ArtifactStore: Send + Sync {
         -> Result<Vec<CachedArtifact>>;
     fn restore_artifacts(&self, workspace: &Path, artifacts: &[CachedArtifact]) -> Result<()>;
     fn prune(&self, max_size_mb: u64) -> Result<PruneReport>;
+    /// Total cache footprint and object count. Defaults to zeros — backends
+    /// that can compute it cheaply should override.
+    fn stats(&self) -> Result<StoreStats> {
+        Ok(StoreStats::default())
+    }
 }

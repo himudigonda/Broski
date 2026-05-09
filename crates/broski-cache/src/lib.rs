@@ -5,7 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
-use broski_store::{ArtifactKind, ArtifactStore, CachedArtifact, ExecutionRecord, PruneReport};
+use broski_store::{
+    ArtifactKind, ArtifactStore, CachedArtifact, ExecutionRecord, PruneReport, StoreStats,
+};
 use rusqlite::{params, Connection};
 use walkdir::WalkDir;
 
@@ -358,6 +360,35 @@ impl ArtifactStore for LocalArtifactStore {
         }
 
         Ok(PruneReport { removed_objects, removed_bytes, remaining_bytes: total })
+    }
+
+    fn stats(&self) -> Result<StoreStats> {
+        let mut object_count = 0usize;
+        let mut total_bytes = 0u64;
+        let entries = match fs::read_dir(&self.objects_dir) {
+            Ok(entries) => entries,
+            // The objects dir is created lazily on first save; an empty cache
+            // legitimately has nothing to walk.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(StoreStats::default());
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("reading objects dir '{}'", self.objects_dir.display())
+                });
+            }
+        };
+        for entry in entries {
+            let entry = entry.context("reading objects dir entry")?;
+            let metadata = entry.metadata().context("reading object metadata")?;
+            object_count += 1;
+            if metadata.is_dir() {
+                total_bytes = total_bytes.saturating_add(dir_size(&entry.path())?);
+            } else if metadata.is_file() {
+                total_bytes = total_bytes.saturating_add(metadata.len());
+            }
+        }
+        Ok(StoreStats { object_count, total_bytes })
     }
 }
 
@@ -874,6 +905,51 @@ mod tests {
             message.contains("validating cached artifact relative path"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn stats_on_empty_cache_returns_zeros() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("create store");
+        let stats = store.stats().expect("stats");
+        assert_eq!(stats.object_count, 0);
+        assert_eq!(stats.total_bytes, 0);
+    }
+
+    #[test]
+    fn stats_after_storing_artifacts_reports_count_and_bytes() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).expect("ws");
+        let payload = b"hello cache world";
+        let out_rel = PathBuf::from("dist/a.txt");
+        let out_abs = workspace.join(&out_rel);
+        fs::create_dir_all(out_abs.parent().expect("parent")).expect("dist");
+        fs::write(&out_abs, payload).expect("write payload");
+
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("store");
+        let _ = store.store_artifacts(&workspace, std::slice::from_ref(&out_rel)).expect("store");
+
+        let stats = store.stats().expect("stats");
+        assert_eq!(stats.object_count, 1, "one artifact stored, one object expected");
+        assert!(
+            stats.total_bytes >= payload.len() as u64,
+            "stats.total_bytes ({}) should cover the payload ({} bytes)",
+            stats.total_bytes,
+            payload.len()
+        );
+    }
+
+    #[test]
+    fn stats_recovers_when_objects_dir_is_missing() {
+        // If something blows away `.broski/cache/objects/` between calls,
+        // stats() should treat it as an empty cache, not error out.
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("store");
+        fs::remove_dir_all(store.objects_dir.clone()).expect("remove objects dir");
+        let stats = store.stats().expect("stats");
+        assert_eq!(stats.object_count, 0);
+        assert_eq!(stats.total_bytes, 0);
     }
 
     #[test]
