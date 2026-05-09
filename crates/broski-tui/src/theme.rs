@@ -21,11 +21,15 @@ pub enum Theme {
     Light,
     /// Maximum contrast, accessibility-friendly.
     HighContrast,
+    /// Pick `Dark` or `Light` based on the actual terminal background.
+    /// Resolved by [`Theme::resolved`] before any pixels are drawn.
+    Auto,
 }
 
 impl Theme {
     /// All built-in theme names, in display order.
-    pub const NAMES: &'static [&'static str] = &["default", "dark", "light", "high-contrast"];
+    pub const NAMES: &'static [&'static str] =
+        &["default", "dark", "light", "high-contrast", "auto"];
 
     /// Resolve the palette for this theme.
     pub fn palette(&self) -> Palette {
@@ -82,6 +86,7 @@ impl Theme {
                 help: Color::White,
                 eta: Color::Magenta,
             },
+            Theme::Auto => self.resolved().palette(),
         }
     }
 
@@ -92,7 +97,48 @@ impl Theme {
             Theme::Dark => "dark",
             Theme::Light => "light",
             Theme::HighContrast => "high-contrast",
+            Theme::Auto => "auto",
         }
+    }
+
+    /// Resolve `Auto` to a concrete theme by sniffing the terminal
+    /// background. Returns `self` unchanged for non-`Auto` variants. Should
+    /// be called BEFORE entering raw mode — the underlying OSC 11 query
+    /// expects a cooked stdout/stdin pair.
+    ///
+    /// On detection failure (terminal doesn't support OSC 11, no TTY,
+    /// timeout), falls back to [`Theme::Default`].
+    pub fn resolved(self) -> Theme {
+        if self != Theme::Auto {
+            return self;
+        }
+        match detect_terminal_kind() {
+            Some(TerminalKind::Dark) => Theme::Dark,
+            Some(TerminalKind::Light) => Theme::Light,
+            None => Theme::Default,
+        }
+    }
+}
+
+/// Inferred terminal background brightness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalKind {
+    Dark,
+    Light,
+}
+
+/// Threshold above which a luma value is considered a "light" background.
+/// terminal-light returns Y in `[0.0, 1.0]` (Rec. 709 luma); 0.5 is the
+/// canonical midpoint and matches what `terminal-light::Luma::dark_or_light`
+/// uses internally.
+const LIGHT_LUMA_THRESHOLD: f32 = 0.5;
+
+fn detect_terminal_kind() -> Option<TerminalKind> {
+    match terminal_light::luma() {
+        Ok(luma) => {
+            Some(if luma < LIGHT_LUMA_THRESHOLD { TerminalKind::Dark } else { TerminalKind::Light })
+        }
+        Err(_) => None,
     }
 }
 
@@ -105,6 +151,7 @@ impl FromStr for Theme {
             "dark" => Ok(Theme::Dark),
             "light" => Ok(Theme::Light),
             "high-contrast" | "highcontrast" | "hc" => Ok(Theme::HighContrast),
+            "auto" => Ok(Theme::Auto),
             other => Err(anyhow!(
                 "unknown theme '{}'; expected one of {}",
                 other,
@@ -173,5 +220,33 @@ mod tests {
             seen.insert(format!("{:?}", theme.palette().failed));
         }
         assert!(seen.len() >= 2, "expected at least two distinct failed colors");
+    }
+
+    #[test]
+    fn auto_theme_parses_and_round_trips() {
+        assert_eq!("auto".parse::<Theme>().unwrap(), Theme::Auto);
+        assert_eq!("AUTO".parse::<Theme>().unwrap(), Theme::Auto);
+        assert_eq!(Theme::Auto.name(), "auto");
+        assert!(Theme::NAMES.contains(&"auto"));
+    }
+
+    #[test]
+    fn auto_theme_resolves_to_a_concrete_variant() {
+        // Without a TTY (cargo test), terminal-light fails fast and
+        // resolved() falls back to Default. With a TTY it'll be Dark or
+        // Light. Either way the result must NOT be Auto, and palette()
+        // must work without recursing.
+        let resolved = Theme::Auto.resolved();
+        assert!(matches!(resolved, Theme::Default | Theme::Dark | Theme::Light));
+        // palette() on Auto should also self-resolve and not loop.
+        let _ = Theme::Auto.palette();
+    }
+
+    #[test]
+    fn non_auto_themes_resolve_to_themselves() {
+        assert_eq!(Theme::Default.resolved(), Theme::Default);
+        assert_eq!(Theme::Dark.resolved(), Theme::Dark);
+        assert_eq!(Theme::Light.resolved(), Theme::Light);
+        assert_eq!(Theme::HighContrast.resolved(), Theme::HighContrast);
     }
 }

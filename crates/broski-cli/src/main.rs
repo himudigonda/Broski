@@ -620,19 +620,24 @@ fn short_fingerprint(fp: &str) -> String {
 }
 
 fn resolve_theme(flag: Option<&str>) -> Result<broski_tui::Theme> {
-    if let Some(value) = flag {
-        return value
+    let parsed = if let Some(value) = flag {
+        value
             .parse::<broski_tui::Theme>()
-            .with_context(|| format!("parsing --theme value '{}'", value));
-    }
-    if let Ok(value) = std::env::var("BROSKI_THEME") {
-        if !value.trim().is_empty() {
-            return value
+            .with_context(|| format!("parsing --theme value '{}'", value))?
+    } else if let Ok(value) = std::env::var("BROSKI_THEME") {
+        if value.trim().is_empty() {
+            broski_tui::Theme::Default
+        } else {
+            value
                 .parse::<broski_tui::Theme>()
-                .with_context(|| format!("parsing BROSKI_THEME value '{}'", value));
+                .with_context(|| format!("parsing BROSKI_THEME value '{}'", value))?
         }
-    }
-    Ok(broski_tui::Theme::Default)
+    } else {
+        broski_tui::Theme::Default
+    };
+    // Resolve `Auto` here — before the TUI enters raw mode — so the OSC 11
+    // background-color query has a cooked stdout/stdin to talk to.
+    Ok(parsed.resolved())
 }
 
 fn emit_run_summary(summary: &broski_core::RunSummary, explain: bool) {

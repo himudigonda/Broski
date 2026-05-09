@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+terminal-light.workspace = true
 broski-core = { path = "../broski-core" }
 broski-store = { path = "../broski-store" }
 
