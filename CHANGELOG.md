@@ -2,7 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.7.0] - 2026-05-08
+## [0.7.0] - 2026-05-09
+
+### Added — Selective DAG Force-Rerun (`x` / `X`)
+- After a run completes, press **`x`** on any highlighted task in the DAG pane to force-rerun just that task while its upstream deps stay cached. Uses the new `RunOptions::force_tasks: HashSet<String>` field; explain reason: `"cache bypass: force-rerun requested"`.
+- Press **`X`** to force-rerun the entire original target from scratch (`force: true` for every task in the graph).
+- Both keys are ignored silently while a run is in progress. The dashboard stays open after either key so the user sees the re-execution live, then can press `x` / `X` again or `q` to exit.
+- Help footer updated: `x force-rerun · X force-all`.
 
 ### Added — Live TUI Dashboard
 - New `broski-tui` crate (built on `ratatui` + `crossterm`) renders a real-time dashboard with DAG state, log tail, summary, and help footer.

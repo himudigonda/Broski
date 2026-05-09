@@ -140,6 +140,24 @@ Render the run through a live `ratatui`-based dashboard:
 - `--explain` is supported: per-task miss reasons land inline on each DAG line and at the top of the selected task's log pane.
 - Interactive tasks (`@mode interactive`) automatically suspend the dashboard, hand the real TTY to the child via `Stdio::inherit`, and resume the dashboard when the child exits.
 
+#### Dashboard key map
+
+| Key | Effect |
+| --- | --- |
+| `↑` / `↓` / `j` / `k` | Move selection cursor in the DAG pane. |
+| `Home` / `g` | Jump to first task. |
+| `End` / `G` | Jump to last task. |
+| `PageUp` / `PageDown` | Scroll log pane 10 lines. |
+| `Shift-↑` / `Shift-↓` | Scroll log pane 1 line. |
+| `Shift-Home` / `Shift-End` | Jump log pane to top / tail. |
+| Mouse wheel | Scroll log pane 3 lines per notch. |
+| `x` | **Force-rerun** the selected task only (deps stay cached). Available after run finishes. |
+| `X` | **Force-rerun** the entire original target (`--force` for all tasks). Available after run finishes. |
+| `c` | Clear logs for the selected task. |
+| `r` | Redraw. |
+| `Ctrl-C` | Soft cancel (first press); hard cancel + exit (second press within 2 s). |
+| `q` / `Esc` | Quit without cancelling. |
+
 #### Launcher mode
 
 Run `broski tui` with no task to enter the interactive launcher. Side-by-side layout: tasks on the left, stats / slash-command suggestions on the right.
