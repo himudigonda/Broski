@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use broski_core::cancel::{CancelLevel, CancellationToken};
 use broski_core::{
     load_broskifile, validate_broskifile, BroskiFile, Executor, ProgressEvent, RunOptions,
-    RunSummary, TaskGraph,
+    RunSummary, TaskGraph, TaskMode,
 };
 use broski_store::ArtifactStore;
 use crossterm::event::{
@@ -340,6 +340,27 @@ fn run_target_in_terminal(
     config: BroskiFile,
     store: Arc<dyn ArtifactStore>,
     target: &str,
+    base_options: RunOptions,
+    palette: &Palette,
+) -> Result<(RunSummary, RunOutcome)> {
+    // If the resolved DAG includes any `@mode interactive` task, run with
+    // the TUI suspended: leave raw mode, drop mouse capture, hand the
+    // terminal to the child via `Stdio::inherit`, then re-enter the
+    // alternate screen when it exits. The dashboard isn't useful for
+    // interactive tasks (dev servers, REPLs, prompts) — they need a real
+    // TTY, and any captured-pipe path would deadlock on prompts.
+    if target_has_interactive_task(&config, target) {
+        return run_target_suspended(terminal, workspace, config, store, target, base_options);
+    }
+    run_target_with_dashboard(terminal, workspace, config, store, target, base_options, palette)
+}
+
+fn run_target_with_dashboard(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    workspace: PathBuf,
+    config: BroskiFile,
+    store: Arc<dyn ArtifactStore>,
+    target: &str,
     mut base_options: RunOptions,
     palette: &Palette,
 ) -> Result<(RunSummary, RunOutcome)> {
@@ -379,6 +400,82 @@ fn run_target_in_terminal(
         (Err(e), _) => Err(e),
         (_, Err(e)) => Err(e),
     }
+}
+
+/// Run the target with the TUI fully suspended: leave raw mode + alt
+/// screen + mouse capture, run the executor with default streaming
+/// settings (no event_sink / no capture, so `Stdio::inherit` flows the
+/// child's stdio straight to the user), then restore the dashboard.
+fn run_target_suspended(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    workspace: PathBuf,
+    config: BroskiFile,
+    store: Arc<dyn ArtifactStore>,
+    target: &str,
+    base_options: RunOptions,
+) -> Result<(RunSummary, RunOutcome)> {
+    suspend_terminal(terminal)?;
+    println!("[broski tui] running interactive task '{target}' — TUI paused");
+
+    let result: Result<RunSummary> = (|| {
+        let executor = Executor::new(workspace, config, store)
+            .context("constructing executor for suspended interactive run")?;
+        executor.run_target(target, &base_options)
+    })();
+
+    // Always try to restore the alternate screen + mouse + raw mode,
+    // even when the run failed. Otherwise the launcher would draw on
+    // top of the user's normal scrollback.
+    if let Err(restore_err) = restore_terminal(terminal) {
+        eprintln!("[broski tui] failed to restore terminal: {restore_err}");
+    }
+
+    let summary = result?;
+    let outcome =
+        if !summary.skipped.is_empty() { RunOutcome::Cancelled } else { RunOutcome::Success };
+    Ok((summary, outcome))
+}
+
+fn suspend_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    disable_raw_mode().context("disabling raw mode for interactive task")?;
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)
+        .context("leaving alt screen for interactive task")?;
+    let _ = terminal.show_cursor();
+    Ok(())
+}
+
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    enable_raw_mode().context("re-enabling raw mode after interactive task")?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)
+        .context("re-entering alt screen after interactive task")?;
+    terminal.clear().context("clearing terminal after interactive task")?;
+    Ok(())
+}
+
+/// Resolve the target's full task graph and report whether any
+/// transitively-required task runs in [`TaskMode::Interactive`].
+/// Best-effort: when graph resolution fails we conservatively return
+/// `false` and let the dashboard try its luck.
+fn target_has_interactive_task(config: &BroskiFile, target: &str) -> bool {
+    let resolved = match config.resolve_task_name(target) {
+        Ok(name) => name,
+        Err(_) => return false,
+    };
+    let graph = match TaskGraph::build(&config.task) {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    let required = match graph.required_tasks_for_target(&resolved) {
+        Ok(tasks) => tasks,
+        Err(_) => return false,
+    };
+    required.iter().any(|name| {
+        config
+            .task
+            .get(name)
+            .map(|spec| spec.inferred_mode() == TaskMode::Interactive)
+            .unwrap_or(false)
+    })
 }
 
 /// Walk the resolved task graph and ask the artifact store for the most
@@ -821,6 +918,92 @@ mod tests {
         assert!(names.contains(&"public_a".to_string()));
         assert!(names.contains(&"public_b".to_string()));
         assert!(!names.contains(&"_private".to_string()));
+    }
+
+    #[test]
+    fn target_with_only_graph_tasks_is_not_interactive() {
+        use broski_core::model::{BroskiSection, RunSpec, TaskSpec};
+        let mut tasks = std::collections::BTreeMap::new();
+        tasks.insert(
+            "build".to_string(),
+            TaskSpec {
+                deps: vec![],
+                description: None,
+                resolved_variables: Default::default(),
+                inputs: vec!["src/lib.rs".into()],
+                stage_ro: vec![],
+                outputs: vec!["dist/out".into()],
+                env: Default::default(),
+                env_inherit: vec![],
+                secret_env: vec![],
+                run: RunSpec::Shell("echo build".into()),
+                isolation: None,
+                mode: None,
+                working_dir: None,
+                params: vec![],
+                private: false,
+                confirm: None,
+                shell_override: None,
+                requires: vec![],
+            },
+        );
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".into() },
+            task: tasks,
+            alias: Default::default(),
+            load_env: vec![],
+        };
+        assert!(!target_has_interactive_task(&config, "build"));
+    }
+
+    #[test]
+    fn target_with_interactive_task_is_detected() {
+        use broski_core::model::{BroskiSection, RunSpec, TaskSpec};
+        let mut tasks = std::collections::BTreeMap::new();
+        // No outputs → inferred Interactive (per model::inferred_mode).
+        tasks.insert(
+            "dev".to_string(),
+            TaskSpec {
+                deps: vec![],
+                description: None,
+                resolved_variables: Default::default(),
+                inputs: vec![],
+                stage_ro: vec![],
+                outputs: vec![],
+                env: Default::default(),
+                env_inherit: vec![],
+                secret_env: vec![],
+                run: RunSpec::Shell("npm run dev".into()),
+                isolation: None,
+                mode: None,
+                working_dir: None,
+                params: vec![],
+                private: false,
+                confirm: None,
+                shell_override: None,
+                requires: vec![],
+            },
+        );
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".into() },
+            task: tasks,
+            alias: Default::default(),
+            load_env: vec![],
+        };
+        assert!(target_has_interactive_task(&config, "dev"));
+    }
+
+    #[test]
+    fn unknown_target_falls_back_to_dashboard() {
+        use broski_core::model::BroskiSection;
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".into() },
+            task: Default::default(),
+            alias: Default::default(),
+            load_env: vec![],
+        };
+        // Unknown target → graph resolution fails → conservatively false.
+        assert!(!target_has_interactive_task(&config, "ghost"));
     }
 
     #[test]
