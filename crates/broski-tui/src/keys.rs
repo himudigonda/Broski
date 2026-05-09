@@ -17,16 +17,36 @@ pub enum Action {
     SelectLast,
     ClearLogs,
     Redraw,
+    /// Scroll the log pane up by N lines (toward older output).
+    LogScrollUp(usize),
+    /// Scroll the log pane down by N lines (toward newer output).
+    LogScrollDown(usize),
+    /// Jump the log pane to the very top of the buffered output.
+    LogScrollHome,
+    /// Jump the log pane back to the tail and resume follow-tail.
+    LogScrollEnd,
     Ignore,
 }
 
+/// Number of lines a single PageUp/PageDown moves through the log pane.
+const PAGE_SCROLL: usize = 10;
+
 pub fn map_key(event: KeyEvent) -> Action {
     let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = event.modifiers.contains(KeyModifiers::SHIFT);
     match event.code {
         KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => Action::Quit,
         KeyCode::Char('c') if ctrl => Action::Interrupt,
         KeyCode::Char('c') => Action::ClearLogs,
         KeyCode::Char('r') | KeyCode::Char('R') => Action::Redraw,
+        KeyCode::PageUp => Action::LogScrollUp(PAGE_SCROLL),
+        KeyCode::PageDown => Action::LogScrollDown(PAGE_SCROLL),
+        // Shift+Up/Down scroll the LOGS by 1 line. Plain Up/Down still
+        // navigate the task list so the existing UX is unchanged.
+        KeyCode::Up if shift => Action::LogScrollUp(1),
+        KeyCode::Down if shift => Action::LogScrollDown(1),
+        KeyCode::Home if shift => Action::LogScrollHome,
+        KeyCode::End if shift => Action::LogScrollEnd,
         KeyCode::Down | KeyCode::Char('j') => Action::SelectNext,
         KeyCode::Up | KeyCode::Char('k') => Action::SelectPrev,
         KeyCode::Home | KeyCode::Char('g') => Action::SelectFirst,
@@ -96,5 +116,48 @@ mod tests {
     fn unknown_keys_are_ignored() {
         assert_eq!(map_key(key(KeyCode::Char('x'))), Action::Ignore);
         assert_eq!(map_key(key(KeyCode::F(1))), Action::Ignore);
+    }
+
+    #[test]
+    fn pageup_pagedown_scroll_logs_by_page() {
+        match map_key(key(KeyCode::PageUp)) {
+            Action::LogScrollUp(n) => assert!(n > 1),
+            other => panic!("PageUp should map to LogScrollUp(>1), got {:?}", other),
+        }
+        match map_key(key(KeyCode::PageDown)) {
+            Action::LogScrollDown(n) => assert!(n > 1),
+            other => panic!("PageDown should map to LogScrollDown(>1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn shift_arrow_scrolls_logs_by_one_line() {
+        assert_eq!(
+            map_key(key_with_mods(KeyCode::Up, KeyModifiers::SHIFT)),
+            Action::LogScrollUp(1)
+        );
+        assert_eq!(
+            map_key(key_with_mods(KeyCode::Down, KeyModifiers::SHIFT)),
+            Action::LogScrollDown(1)
+        );
+    }
+
+    #[test]
+    fn shift_home_end_jump_to_top_and_tail() {
+        assert_eq!(
+            map_key(key_with_mods(KeyCode::Home, KeyModifiers::SHIFT)),
+            Action::LogScrollHome
+        );
+        assert_eq!(map_key(key_with_mods(KeyCode::End, KeyModifiers::SHIFT)), Action::LogScrollEnd);
+    }
+
+    #[test]
+    fn unshifted_arrows_still_navigate_tasks() {
+        // Make sure adding shift-arrow handling didn't break the
+        // status-quo task-cursor behavior on plain arrows.
+        assert_eq!(map_key(key(KeyCode::Up)), Action::SelectPrev);
+        assert_eq!(map_key(key(KeyCode::Down)), Action::SelectNext);
+        assert_eq!(map_key(key(KeyCode::Home)), Action::SelectFirst);
+        assert_eq!(map_key(key(KeyCode::End)), Action::SelectLast);
     }
 }

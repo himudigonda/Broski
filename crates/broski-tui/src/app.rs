@@ -22,7 +22,10 @@ use broski_core::{
     RunSummary, TaskGraph,
 };
 use broski_store::ArtifactStore;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -439,6 +442,14 @@ fn drive_loop(
                     }
                     dirty = true;
                 }
+                Event::Mouse(mouse) => {
+                    if let Some(action) = map_mouse_to_log_scroll(mouse) {
+                        if apply_action(&mut state, action, cancellation, &mut last_interrupt) {
+                            return Ok(());
+                        }
+                        dirty = true;
+                    }
+                }
                 Event::Resize(_, _) => dirty = true,
                 _ => {}
             }
@@ -529,7 +540,38 @@ fn apply_action(
             state.clear_selected_logs();
             false
         }
+        Action::LogScrollUp(n) => {
+            state.scroll_logs_up(n);
+            false
+        }
+        Action::LogScrollDown(n) => {
+            state.scroll_logs_down(n);
+            false
+        }
+        Action::LogScrollHome => {
+            state.scroll_logs_home();
+            false
+        }
+        Action::LogScrollEnd => {
+            state.scroll_logs_end();
+            false
+        }
         Action::Redraw | Action::Ignore => false,
+    }
+}
+
+/// Lines moved per mouse-wheel notch in the dashboard's log pane.
+/// Three is the typical OS-default scroll step.
+const MOUSE_WHEEL_LINES: usize = 3;
+
+/// Translate a mouse event into a log-scroll action. Returns `None` for
+/// non-wheel events (clicks, drag, etc.) so the caller can ignore them.
+/// Pure: easy to unit-test on synthetic `MouseEvent`s.
+pub(crate) fn map_mouse_to_log_scroll(mouse: MouseEvent) -> Option<Action> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => Some(Action::LogScrollUp(MOUSE_WHEEL_LINES)),
+        MouseEventKind::ScrollDown => Some(Action::LogScrollDown(MOUSE_WHEEL_LINES)),
+        _ => None,
     }
 }
 
@@ -603,14 +645,18 @@ fn redraw(
 fn enter_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("enabling raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("entering alternate screen")?;
+    // Enable mouse capture so the dashboard can scroll the log pane on
+    // wheel events. Crossterm emits these as `Event::Mouse` with kind
+    // `ScrollUp` / `ScrollDown` once capture is on.
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .context("entering alternate screen")?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend).context("creating terminal")
 }
 
 fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen);
     let _ = terminal.show_cursor();
     Ok(())
 }
@@ -702,6 +748,40 @@ mod tests {
     fn launcher_unknown_keys_are_ignored() {
         assert_eq!(map_launcher_key(key(KeyCode::F(5))), LauncherAction::Ignore);
         assert_eq!(map_launcher_key(key(KeyCode::Insert)), LauncherAction::Ignore);
+    }
+
+    fn mouse_event(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE }
+    }
+
+    #[test]
+    fn mouse_wheel_up_scrolls_logs_up() {
+        match map_mouse_to_log_scroll(mouse_event(MouseEventKind::ScrollUp)) {
+            Some(Action::LogScrollUp(n)) => assert!(n > 0),
+            other => panic!("ScrollUp should yield LogScrollUp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mouse_wheel_down_scrolls_logs_down() {
+        match map_mouse_to_log_scroll(mouse_event(MouseEventKind::ScrollDown)) {
+            Some(Action::LogScrollDown(n)) => assert!(n > 0),
+            other => panic!("ScrollDown should yield LogScrollDown, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mouse_clicks_and_drags_are_ignored() {
+        use crossterm::event::MouseButton;
+        assert!(
+            map_mouse_to_log_scroll(mouse_event(MouseEventKind::Down(MouseButton::Left))).is_none()
+        );
+        assert!(
+            map_mouse_to_log_scroll(mouse_event(MouseEventKind::Up(MouseButton::Left))).is_none()
+        );
+        assert!(
+            map_mouse_to_log_scroll(mouse_event(MouseEventKind::Drag(MouseButton::Left))).is_none()
+        );
     }
 
     #[test]

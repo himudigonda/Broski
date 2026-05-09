@@ -21,7 +21,7 @@ impl<'s> HelpFooter<'s> {
 impl Widget for HelpFooter<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let line = Line::from(Span::styled(
-            " q quit · Ctrl-C cancel · ↑/↓ select · c clear logs · r redraw ",
+            " q quit · Ctrl-C cancel · ↑/↓ select · PgUp/Dn · Shift-↑/↓ scroll logs · wheel · c clear · r redraw ",
             Style::default().fg(self.palette.help),
         ));
         Paragraph::new(line).render(area, buf);

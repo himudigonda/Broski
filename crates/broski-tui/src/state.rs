@@ -36,6 +36,15 @@ pub struct TaskInfo {
     pub duration: Duration,
     pub error: Option<String>,
     pub logs: VecDeque<LogLineRecord>,
+    /// Distance the user has scrolled UP from the bottom of [`logs`], in
+    /// log lines. `0` means "follow the tail"; any positive value means
+    /// the user is reviewing older output and we should NOT auto-snap to
+    /// the bottom on new lines.
+    pub scrollback: usize,
+    /// True while [`scrollback`] is `0` *and* we should keep snapping to
+    /// the bottom on new lines. Flipped off the moment the user scrolls
+    /// up; flipped back on when they hit `End` or scroll past the bottom.
+    pub follow_tail: bool,
 }
 
 impl Default for TaskInfo {
@@ -47,6 +56,8 @@ impl Default for TaskInfo {
             duration: Duration::ZERO,
             error: None,
             logs: VecDeque::new(),
+            scrollback: 0,
+            follow_tail: true,
         }
     }
 }
@@ -155,10 +166,21 @@ impl TuiState {
             }
             ProgressEvent::LogLine { task, stream, line } => {
                 let info = self.tasks.entry(task).or_default();
-                if info.logs.len() >= LOG_CAPACITY {
+                let was_full = info.logs.len() >= LOG_CAPACITY;
+                if was_full {
                     info.logs.pop_front();
+                    // We dropped the oldest line, so any positive
+                    // scrollback offset has effectively shifted by one.
+                    // Decrement so the user keeps looking at the same
+                    // visual region rather than silently sliding upward.
+                    info.scrollback = info.scrollback.saturating_sub(1);
                 }
                 info.logs.push_back(LogLineRecord { stream, line });
+                // When following the tail, keep scrollback pinned to 0;
+                // otherwise leave the user where they were.
+                if info.follow_tail {
+                    info.scrollback = 0;
+                }
             }
             ProgressEvent::TaskFinished { task, status, duration, error } => {
                 let info = self.tasks.entry(task).or_default();
@@ -214,8 +236,61 @@ impl TuiState {
         if let Some(name) = self.selected_task().map(str::to_string) {
             if let Some(info) = self.tasks.get_mut(&name) {
                 info.logs.clear();
+                info.scrollback = 0;
+                info.follow_tail = true;
             }
         }
+    }
+
+    /// Scroll the selected task's log pane UP by `lines`. Disengages
+    /// follow-tail (so new lines arriving don't yank the user back to
+    /// the bottom). `lines == 0` is a no-op.
+    pub fn scroll_logs_up(&mut self, lines: usize) {
+        let Some(info) = self.selected_task_info_mut() else {
+            return;
+        };
+        let total = info.logs.len();
+        // Maximum scrollback is `total - 1` so at least one line stays
+        // visible at the very top.
+        let max = total.saturating_sub(1);
+        info.scrollback = info.scrollback.saturating_add(lines).min(max);
+        info.follow_tail = info.scrollback == 0;
+    }
+
+    /// Scroll the selected task's log pane DOWN by `lines`. Hitting the
+    /// bottom (`scrollback == 0`) re-enables follow-tail.
+    pub fn scroll_logs_down(&mut self, lines: usize) {
+        let Some(info) = self.selected_task_info_mut() else {
+            return;
+        };
+        info.scrollback = info.scrollback.saturating_sub(lines);
+        if info.scrollback == 0 {
+            info.follow_tail = true;
+        }
+    }
+
+    /// Jump to the very top of the selected task's log buffer.
+    pub fn scroll_logs_home(&mut self) {
+        let Some(info) = self.selected_task_info_mut() else {
+            return;
+        };
+        let total = info.logs.len();
+        info.scrollback = total.saturating_sub(1);
+        info.follow_tail = false;
+    }
+
+    /// Jump back to the tail (bottom) and resume follow-tail mode.
+    pub fn scroll_logs_end(&mut self) {
+        let Some(info) = self.selected_task_info_mut() else {
+            return;
+        };
+        info.scrollback = 0;
+        info.follow_tail = true;
+    }
+
+    fn selected_task_info_mut(&mut self) -> Option<&mut TaskInfo> {
+        let name = self.selected_task().map(str::to_string)?;
+        self.tasks.get_mut(&name)
     }
 }
 
@@ -387,6 +462,117 @@ mod tests {
         let mut s = TuiState::new();
         s.apply(ev_run_started(vec![vec!["a"]]));
         assert_eq!(s.remaining_eta(), Duration::ZERO);
+    }
+
+    fn push_log(s: &mut TuiState, task: &str, line: &str) {
+        s.apply(ProgressEvent::LogLine {
+            task: task.to_string(),
+            stream: LogStream::Stdout,
+            line: line.into(),
+        });
+    }
+
+    #[test]
+    fn new_log_line_pins_scrollback_to_zero_when_following_tail() {
+        let mut s = TuiState::new();
+        s.apply(ev_run_started(vec![vec!["a"]]));
+        push_log(&mut s, "a", "one");
+        push_log(&mut s, "a", "two");
+        let info = &s.tasks["a"];
+        assert!(info.follow_tail);
+        assert_eq!(info.scrollback, 0);
+    }
+
+    #[test]
+    fn scroll_up_disengages_follow_and_clamps_at_top() {
+        let mut s = TuiState::new();
+        s.apply(ev_run_started(vec![vec!["a"]]));
+        for i in 0..10 {
+            push_log(&mut s, "a", &format!("line {i}"));
+        }
+        s.scroll_logs_up(3);
+        let info = &s.tasks["a"];
+        assert_eq!(info.scrollback, 3);
+        assert!(!info.follow_tail);
+
+        // New lines should NOT snap back to bottom while user is scrolled up.
+        push_log(&mut s, "a", "line 10");
+        let info = &s.tasks["a"];
+        assert_eq!(info.scrollback, 3);
+        assert!(!info.follow_tail);
+
+        // Asking for way more than available clamps to len-1.
+        s.scroll_logs_up(10_000);
+        let info = &s.tasks["a"];
+        assert_eq!(info.scrollback, info.logs.len() - 1);
+    }
+
+    #[test]
+    fn scroll_down_to_zero_resumes_follow_tail() {
+        let mut s = TuiState::new();
+        s.apply(ev_run_started(vec![vec!["a"]]));
+        for i in 0..5 {
+            push_log(&mut s, "a", &format!("line {i}"));
+        }
+        s.scroll_logs_up(2);
+        assert!(!s.tasks["a"].follow_tail);
+        s.scroll_logs_down(2);
+        let info = &s.tasks["a"];
+        assert_eq!(info.scrollback, 0);
+        assert!(info.follow_tail);
+
+        // Once follow is back on, new lines stay pinned at 0.
+        push_log(&mut s, "a", "line 5");
+        assert_eq!(s.tasks["a"].scrollback, 0);
+    }
+
+    #[test]
+    fn scroll_home_jumps_to_top_and_end_jumps_to_tail() {
+        let mut s = TuiState::new();
+        s.apply(ev_run_started(vec![vec!["a"]]));
+        for i in 0..7 {
+            push_log(&mut s, "a", &format!("line {i}"));
+        }
+        s.scroll_logs_home();
+        assert_eq!(s.tasks["a"].scrollback, 6);
+        assert!(!s.tasks["a"].follow_tail);
+        s.scroll_logs_end();
+        assert_eq!(s.tasks["a"].scrollback, 0);
+        assert!(s.tasks["a"].follow_tail);
+    }
+
+    #[test]
+    fn scroll_methods_are_no_op_with_no_selection() {
+        let mut s = TuiState::new();
+        // No tasks, no panic.
+        s.scroll_logs_up(3);
+        s.scroll_logs_down(3);
+        s.scroll_logs_home();
+        s.scroll_logs_end();
+    }
+
+    #[test]
+    fn evicting_oldest_line_keeps_user_view_stable() {
+        // When the ring buffer is full and a new line is pushed, the
+        // oldest line is dropped; if the user was scrolled up, their
+        // visual position should slide along with the buffer (i.e.
+        // scrollback decrements by 1) so they're still looking at the
+        // same lines, not a silently-shifted view.
+        let mut s = TuiState::new();
+        s.apply(ev_run_started(vec![vec!["x"]]));
+        // Fill the ring exactly.
+        for i in 0..LOG_CAPACITY {
+            push_log(&mut s, "x", &format!("line {i}"));
+        }
+        s.scroll_logs_up(50);
+        let before = s.tasks["x"].scrollback;
+        // Push 10 more lines — each evicts one.
+        for i in 0..10 {
+            push_log(&mut s, "x", &format!("evictor {i}"));
+        }
+        let after = s.tasks["x"].scrollback;
+        assert_eq!(after, before.saturating_sub(10), "scrollback must slide with eviction");
+        assert!(!s.tasks["x"].follow_tail, "follow_tail must stay off while user is scrolled up");
     }
 
     #[test]

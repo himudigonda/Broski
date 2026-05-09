@@ -25,7 +25,12 @@ impl Widget for LogsWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let task = self.state.selected_task();
         let title = match task {
-            Some(name) => format!(" Logs · {name} "),
+            Some(name) => match self.state.tasks.get(name) {
+                Some(info) if info.scrollback > 0 => {
+                    format!(" Logs · {name} · ↑{} ", info.scrollback)
+                }
+                _ => format!(" Logs · {name} "),
+            },
             None => " Logs ".to_string(),
         };
         let block = Block::default()
@@ -41,8 +46,11 @@ impl Widget for LogsWidget<'_> {
                 } else {
                     let max_visible = area.height.saturating_sub(2) as usize;
                     let total = info.logs.len();
-                    let start = total.saturating_sub(max_visible);
-                    for record in info.logs.iter().skip(start) {
+                    // The visible window's right edge is `total - scrollback`
+                    // (exclusive). Subtract `max_visible` to find the start.
+                    let end = total.saturating_sub(info.scrollback);
+                    let start = end.saturating_sub(max_visible);
+                    for record in info.logs.iter().skip(start).take(end - start) {
                         let color = match record.stream {
                             LogStream::Stdout => self.palette.stdout,
                             LogStream::Stderr => self.palette.stderr,
@@ -53,11 +61,16 @@ impl Widget for LogsWidget<'_> {
                         )));
                     }
                 }
-                if let Some(error) = info.error.as_ref() {
-                    lines.push(Line::from(Span::styled(
-                        format!("error: {error}"),
-                        Style::default().fg(self.palette.failed),
-                    )));
+                // Only print the trailing error when the user is actually
+                // looking at the tail; otherwise it would awkwardly inject
+                // itself between the lines they're reviewing.
+                if info.scrollback == 0 {
+                    if let Some(error) = info.error.as_ref() {
+                        lines.push(Line::from(Span::styled(
+                            format!("error: {error}"),
+                            Style::default().fg(self.palette.failed),
+                        )));
+                    }
                 }
             }
         } else {
