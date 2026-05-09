@@ -40,7 +40,7 @@ These flags apply to `broski <task>` and `broski run <task>`.
 | `--force-isolation` | off | Force strict isolation for graph tasks. | Not supported for interactive tasks. |
 | `--jobs <n>` | auto | Override worker concurrency. | Explicit run supports `--jobs <n>`. Implicit run supports `--jobs=<n>`. |
 | `--tui` | off | Render this run through the live TUI dashboard instead of the spinner output. | Mutually exclusive with `--dry-run`, `--explain`, and `--watch`. |
-| `--theme <name>` | `default` | Dashboard color palette (`default`, `dark`, `light`, `high-contrast`/`hc`). | Also honored via `BROSKI_THEME`. Only meaningful with `--tui` or `broski tui`. |
+| `--theme <name>` | `default` | Dashboard color palette (`default`, `dark`, `light`, `high-contrast`/`hc`, `auto`). | Also honored via `BROSKI_THEME`. `auto` queries the terminal background via OSC 11. Only meaningful with `--tui` or `broski tui`. |
 
 ## Global flags
 
@@ -140,13 +140,41 @@ Render the run through a live `ratatui`-based dashboard:
 
 #### Launcher mode
 
-Run `broski tui` with no task to enter the interactive launcher:
+Run `broski tui` with no task to enter the interactive launcher. Side-by-side layout: tasks on the left, stats / slash-command suggestions on the right.
 
 - Filterable task list (type-ahead substring match, case-insensitive).
-- Free-form input box; `--` in the input forwards trailing tokens as task passthrough args.
+- Free-form input box with a real blinking cursor; `--` in the input forwards trailing tokens as task passthrough args.
 - Tab completes the input from the highlighted task; Esc/Ctrl-U clears.
-- Enter runs the typed target — or the highlighted match if the input is a partial substring — then pops back to the launcher with a status banner and a recent-runs list.
+- Enter runs the typed target — or the highlighted match if the input is a partial substring — then pops back to the launcher with a status banner.
 - `q` / Ctrl-C exit only when the input is empty.
+
+##### Slash commands
+
+Type `/` in the input box to flip into a command palette. Tab completes to the canonical form, Enter dispatches.
+
+| Command | Effect |
+| --- | --- |
+| `/help` | Show key map + command catalog (alias `/h`, `/?`). |
+| `/theme <name>` | Switch theme live: `default`, `dark`, `light`, `high-contrast`, `auto`. |
+| `/about` | Show broski version (alias `/version`). |
+| `/clear` | Wipe session history and reset counters. |
+| `/refresh` | Reload `broskifile` and refresh stats (alias `/reload`). |
+| `/cache prune <MB>` | Prune the cache to a size budget; report bytes freed. |
+| `/quit` | Exit the launcher (aliases `/q`, `/exit`). |
+
+##### Stats panel
+
+In Filter mode, the right column shows live info in stacked cards:
+
+- **Workspace** — path, version, git rev, theme (with `auto → dark` resolution when applicable).
+- **Cache** — object count and total size.
+- **Session** — total runs · ✓✗⊘ counters · accumulated wall-clock.
+- **Task detail** — when a task is highlighted: description, deps, `@in`/`@out` counts, last successful run.
+- **Recent runs** — last few completed runs.
+
+##### Auto theme
+
+`--theme auto` queries the terminal's background via OSC 11 and picks Dark or Light. Falls back to Default when the terminal doesn't respond.
 
 Theme selection:
 

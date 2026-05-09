@@ -28,6 +28,24 @@ All notable changes to this project are documented in this file.
 - Inline `-- args` in the input box are forwarded to the task as passthrough arguments (e.g. `test -- --grep slow`).
 - Private tasks are hidden from the launcher list.
 
+### Added — Slash Commands in the Launcher
+- Type `/` in the launcher input box to switch to a Claude-CLI-style command palette with type-ahead filtering and Tab completion.
+- Commands: `/help`, `/theme <name>`, `/about`, `/clear`, `/refresh`, `/cache prune <MB>`, `/quit` (alias `/q`). Aliases include `/h`, `/?`, `/version`, `/reload`, `/exit`.
+- `/theme` switches the active palette **live** without dropping the TUI; supports `auto` (resolved via OSC 11) and the four built-in themes.
+- `/refresh` re-loads `broskifile` from disk and rebuilds the task list and stats panel.
+- `/cache prune <MB>` invokes `ArtifactStore::prune` and reports objects/bytes freed in the status banner.
+
+### Added — Auto Theme
+- New `Theme::Auto` resolves to `Dark` or `Light` by querying the actual terminal background via OSC 11 (with `COLORFGBG` fallback). Falls back to `Theme::Default` when the terminal doesn't respond.
+- Selectable via `--theme auto`, `BROSKI_THEME=auto`, or `/theme auto` mid-session.
+- Resolution happens before raw mode is engaged so the OSC 11 round-trip uses a cooked stdio pair.
+
+### Added — Stats Panel
+- The launcher's right column now shows live stats cards: workspace path + broski version + git rev + theme, cache size + object count, session counters (total runs · ✓✗⊘ · total time), and per-task detail (description, deps, @in/@out glob counts, last successful run) for whichever task is highlighted.
+- New `ArtifactStore::stats()` returning `StoreStats { object_count, total_bytes }`. `LocalArtifactStore` overrides to walk `.broski/cache/objects/` once.
+- The launcher snapshot refreshes after every Run / Refresh / `/cache prune`. A real terminal cursor (via `Frame::set_cursor_position`) replaces the static glyph in the input box.
+- Side-by-side layout collapses to a single column on terminals narrower than 80 cells.
+
 ### Added — `broski history` Command
 - `broski history` lists the most recent successful execution per task (newest first, with relative-time and duration columns).
 - `broski history <task> --limit N` lists the last N runs for a single task with absolute-time, duration, and short-fingerprint columns.
