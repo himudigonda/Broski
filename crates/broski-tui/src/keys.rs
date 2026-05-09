@@ -25,6 +25,10 @@ pub enum Action {
     LogScrollHome,
     /// Jump the log pane back to the tail and resume follow-tail.
     LogScrollEnd,
+    /// Force-rerun only the selected task (deps still use cache).
+    ForceRerunSelected,
+    /// Force-rerun the entire original target (all tasks bypass cache).
+    ForceRerunAll,
     Ignore,
 }
 
@@ -51,6 +55,8 @@ pub fn map_key(event: KeyEvent) -> Action {
         KeyCode::Up | KeyCode::Char('k') => Action::SelectPrev,
         KeyCode::Home | KeyCode::Char('g') => Action::SelectFirst,
         KeyCode::End | KeyCode::Char('G') => Action::SelectLast,
+        KeyCode::Char('x') => Action::ForceRerunSelected,
+        KeyCode::Char('X') => Action::ForceRerunAll,
         _ => Action::Ignore,
     }
 }
@@ -114,8 +120,18 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_ignored() {
-        assert_eq!(map_key(key(KeyCode::Char('x'))), Action::Ignore);
         assert_eq!(map_key(key(KeyCode::F(1))), Action::Ignore);
+        assert_eq!(map_key(key(KeyCode::Char('z'))), Action::Ignore);
+    }
+
+    #[test]
+    fn x_maps_to_force_rerun_selected() {
+        assert_eq!(map_key(key(KeyCode::Char('x'))), Action::ForceRerunSelected);
+    }
+
+    #[test]
+    fn shift_x_maps_to_force_rerun_all() {
+        assert_eq!(map_key(key(KeyCode::Char('X'))), Action::ForceRerunAll);
     }
 
     #[test]

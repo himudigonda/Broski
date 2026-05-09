@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -51,6 +51,10 @@ pub struct RunOptions {
     /// in-flight child receives `SIGTERM`. `None` (the default) preserves
     /// the pre-cancellation behavior exactly.
     pub cancellation: Option<CancellationToken>,
+    /// Bypass the cache for exactly these task names. Unlike `force` (which
+    /// bypasses every task in the graph), this lets callers force only the
+    /// selected node while its deps still use cache hits.
+    pub force_tasks: HashSet<String>,
 }
 
 impl Default for RunOptions {
@@ -67,6 +71,7 @@ impl Default for RunOptions {
             event_sink: None,
             capture_output: false,
             cancellation: None,
+            force_tasks: HashSet::new(),
         }
     }
 }
@@ -641,7 +646,8 @@ impl Executor {
         emit_phase(&progress, task_name, TaskPhase::Fingerprint, elapsed_fingerprint);
         let mut cache_miss_reasons = Vec::new();
 
-        if !options.force && !options.no_cache {
+        let per_task_force = options.force_tasks.contains(task_name);
+        if !options.force && !per_task_force && !options.no_cache {
             if let Some(record) =
                 self.store.fetch_execution(task_name, &fingerprint_result.fingerprint.0)?
             {
@@ -837,6 +843,9 @@ impl Executor {
     ) -> Result<Vec<String>> {
         if options.force {
             return Ok(vec!["cache bypass: --force supplied".to_string()]);
+        }
+        if options.force_tasks.contains(task_name) {
+            return Ok(vec!["cache bypass: force-rerun requested".to_string()]);
         }
         if options.no_cache {
             return Ok(vec!["cache bypass: --no-cache supplied".to_string()]);
@@ -3056,5 +3065,119 @@ mod tests {
         assert!(summary.skipped.contains(&"alpha".to_string()));
         assert!(summary.skipped.contains(&"beta".to_string()));
         assert!(summary.skipped.contains(&"dev".to_string()));
+    }
+
+    #[test]
+    fn force_tasks_bypasses_only_specified_task() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::create_dir_all(workspace.join("dist")).expect("create dist");
+        fs::write(workspace.join("src/input.txt"), b"hello").expect("write input");
+
+        // Two-task chain: build → check
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "build".to_string(),
+            TaskSpec {
+                deps: vec![],
+                inputs: vec!["src/input.txt".to_string()],
+                outputs: vec!["dist/build.txt".to_string()],
+                run: RunSpec::Shell("mkdir -p dist && echo built > dist/build.txt".to_string()),
+                ..simple_task("mkdir -p dist && echo built > dist/build.txt")
+            },
+        );
+        tasks.insert(
+            "check".to_string(),
+            TaskSpec {
+                deps: vec!["build".to_string()],
+                inputs: vec!["dist/build.txt".to_string()],
+                outputs: vec!["dist/check.txt".to_string()],
+                run: RunSpec::Shell(
+                    "mkdir -p dist && echo checked > dist/check.txt".to_string(),
+                ),
+                ..simple_task("mkdir -p dist && echo checked > dist/check.txt")
+            },
+        );
+
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.7".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+
+        let cache_path = workspace.join(".broski/cache");
+        let cache = LocalArtifactStore::new(&cache_path).expect("cache");
+        let store = Arc::new(cache);
+        let executor = Executor::new(&workspace, config.clone(), store.clone()).expect("executor");
+
+        // First run: both tasks execute.
+        let s1 = executor.run_target("check", &RunOptions::default()).expect("first run");
+        assert!(s1.executed.contains(&"build".to_string()), "build executed first run");
+        assert!(s1.executed.contains(&"check".to_string()), "check executed first run");
+
+        // Second run with no force: both should be cache hits.
+        let executor2 =
+            Executor::new(&workspace, config.clone(), store.clone()).expect("executor2");
+        let s2 = executor2.run_target("check", &RunOptions::default()).expect("second run");
+        assert!(s2.cache_hits.contains(&"build".to_string()), "build cache hit");
+        assert!(s2.cache_hits.contains(&"check".to_string()), "check cache hit");
+
+        // Third run with force_tasks = {"check"}: build should still hit cache, check re-executes.
+        let executor3 =
+            Executor::new(&workspace, config.clone(), store.clone()).expect("executor3");
+        let opts = RunOptions {
+            force_tasks: ["check".to_string()].into_iter().collect(),
+            ..RunOptions::default()
+        };
+        let s3 = executor3.run_target("check", &opts).expect("force_tasks run");
+        assert!(
+            s3.cache_hits.contains(&"build".to_string()),
+            "build still cached with force_tasks"
+        );
+        assert!(s3.executed.contains(&"check".to_string()), "check re-executed via force_tasks");
+    }
+
+    #[test]
+    fn force_tasks_and_global_force_are_additive() {
+        // When `force: true` is set, all tasks bypass even if `force_tasks` is
+        // also populated — the two are OR'd together, not XOR'd.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::create_dir_all(workspace.join("dist")).expect("create dist");
+        fs::write(workspace.join("src/input.txt"), b"data").expect("write input");
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "build".to_string(),
+            simple_task("mkdir -p dist && echo hi > dist/output.txt"),
+        );
+
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.7".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+
+        let cache_path = workspace.join(".broski/cache");
+        let cache = LocalArtifactStore::new(&cache_path).expect("cache");
+        let store = Arc::new(cache);
+
+        // First run to populate cache.
+        let e1 = Executor::new(&workspace, config.clone(), store.clone()).expect("e1");
+        e1.run_target("build", &RunOptions::default()).expect("seed run");
+
+        // Run with both force and force_tasks set: must still re-execute.
+        let e2 = Executor::new(&workspace, config.clone(), store.clone()).expect("e2");
+        let opts = RunOptions {
+            force: true,
+            force_tasks: ["build".to_string()].into_iter().collect(),
+            ..RunOptions::default()
+        };
+        let s = e2.run_target("build", &opts).expect("combined force run");
+        assert!(s.executed.contains(&"build".to_string()), "task re-executed when both flags set");
     }
 }

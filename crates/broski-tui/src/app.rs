@@ -39,13 +39,21 @@ use crate::launcher::{
     LauncherAction, LauncherCtx, LauncherDecision, LauncherState, ParsedCommand, RunOutcome,
     TaskMeta,
 };
-use crate::state::{CancelState, TuiState};
+use crate::state::{CancelState, RerunRequest, TuiState};
 use crate::theme::{Palette, Theme};
 use crate::widgets::dag::DagWidget;
 use crate::widgets::help::HelpFooter;
 use crate::widgets::launcher::LauncherWidget;
 use crate::widgets::logs::LogsWidget;
 use crate::widgets::summary::SummaryWidget;
+
+/// Outcome returned by `drive_loop` to the run-orchestration caller.
+enum LoopDecision {
+    /// User pressed `q` / Esc / second Ctrl-C.
+    Quit,
+    /// User pressed `x` or `X` after the run finished.
+    Rerun(RerunRequest),
+}
 
 /// Foreground poll cadence. Keys come in via `event::poll` so this also
 /// caps the redraw rate when no events are arriving.
@@ -360,46 +368,61 @@ fn run_target_with_dashboard(
     workspace: PathBuf,
     config: BroskiFile,
     store: Arc<dyn ArtifactStore>,
-    target: &str,
-    mut base_options: RunOptions,
+    original_target: &str,
+    base_options: RunOptions,
     palette: &Palette,
 ) -> Result<(RunSummary, RunOutcome)> {
-    let etas = prefetch_etas(&config, target, store.as_ref());
+    let mut current_target = original_target.to_string();
+    let mut pending_rerun: Option<RerunRequest> = None;
 
-    let (event_tx, event_rx) = mpsc::channel::<ProgressEvent>();
-    let cancellation = CancellationToken::new();
-    base_options.event_sink = Some(event_tx);
-    base_options.capture_output = true;
-    base_options.cancellation = Some(cancellation.clone());
-
-    let executor_workspace = workspace.clone();
-    let executor_target = target.to_string();
-    let executor_options = base_options.clone();
-    let executor_handle = thread::spawn(move || -> Result<RunSummary> {
-        let executor = Executor::new(executor_workspace, config, store)
-            .context("constructing executor for TUI run")?;
-        executor.run_target(&executor_target, &executor_options)
-    });
-
-    let drive_result = drive_loop(terminal, event_rx, palette, etas, &cancellation);
-    let summary_result =
-        executor_handle.join().map_err(|_| anyhow::anyhow!("executor thread panicked"))?;
-
-    match (drive_result, summary_result) {
-        (Ok(_), Ok(summary)) => {
-            // The executor returns Err on a task failure, so a successful
-            // summary at this point means every required task either ran
-            // cleanly, hit the cache, or was skipped by cancellation.
-            let outcome = if !summary.skipped.is_empty() {
-                RunOutcome::Cancelled
+    let summary = loop {
+        // Build per-iteration options: apply force_tasks / force from any
+        // pending rerun request, preserving the original CLI options otherwise.
+        let mut opts = base_options.clone();
+        if let Some(ref req) = pending_rerun {
+            if req.force_all {
+                opts.force = true;
             } else {
-                RunOutcome::Success
-            };
-            Ok((summary, outcome))
+                opts.force_tasks = std::iter::once(req.task.clone()).collect();
+            }
         }
-        (Err(e), _) => Err(e),
-        (_, Err(e)) => Err(e),
-    }
+
+        let etas = prefetch_etas(&config, &current_target, store.as_ref());
+        let (event_tx, event_rx) = mpsc::channel::<ProgressEvent>();
+        let cancellation = CancellationToken::new();
+        opts.event_sink = Some(event_tx);
+        opts.capture_output = true;
+        opts.cancellation = Some(cancellation.clone());
+
+        let exec_workspace = workspace.clone();
+        let exec_config = config.clone();
+        let exec_store = store.clone();
+        let exec_target = current_target.clone();
+        let exec_opts = opts.clone();
+        let executor_handle = thread::spawn(move || -> Result<RunSummary> {
+            Executor::new(exec_workspace, exec_config, exec_store)
+                .context("constructing executor for TUI run")?
+                .run_target(&exec_target, &exec_opts)
+        });
+
+        let decision = drive_loop(terminal, event_rx, palette, etas, &cancellation);
+        let iter_summary = executor_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("executor thread panicked"))??;
+
+        match decision? {
+            LoopDecision::Quit => break iter_summary,
+            LoopDecision::Rerun(req) => {
+                current_target = req.task.clone();
+                pending_rerun = Some(req);
+                // drive_loop creates a fresh TuiState each call, so no
+                // manual state reset is needed here.
+            }
+        }
+    };
+    let outcome =
+        if !summary.skipped.is_empty() { RunOutcome::Cancelled } else { RunOutcome::Success };
+    Ok((summary, outcome))
 }
 
 /// Run the target with the TUI fully suspended: leave raw mode + alt
@@ -516,7 +539,7 @@ fn drive_loop(
     palette: &Palette,
     etas: BTreeMap<String, Duration>,
     cancellation: &CancellationToken,
-) -> Result<()> {
+) -> Result<LoopDecision> {
     let mut state = TuiState::with_etas(etas);
     let mut dirty = true;
     let mut channel_open = true;
@@ -535,14 +558,17 @@ fn drive_loop(
                 Event::Key(key) => {
                     let action = map_key(key);
                     if apply_action(&mut state, action, cancellation, &mut last_interrupt) {
-                        return Ok(());
+                        return Ok(LoopDecision::Quit);
+                    }
+                    if let Some(req) = state.pending_rerun.take() {
+                        return Ok(LoopDecision::Rerun(req));
                     }
                     dirty = true;
                 }
                 Event::Mouse(mouse) => {
                     if let Some(action) = map_mouse_to_log_scroll(mouse) {
                         if apply_action(&mut state, action, cancellation, &mut last_interrupt) {
-                            return Ok(());
+                            return Ok(LoopDecision::Quit);
                         }
                         dirty = true;
                     }
@@ -651,6 +677,18 @@ fn apply_action(
         }
         Action::LogScrollEnd => {
             state.scroll_logs_end();
+            false
+        }
+        Action::ForceRerunSelected => {
+            if let Some(name) = state.selected_task().map(str::to_string) {
+                state.request_rerun(name, false);
+            }
+            false
+        }
+        Action::ForceRerunAll => {
+            if let Some(name) = state.target.clone() {
+                state.request_rerun(name, true);
+            }
             false
         }
         Action::Redraw | Action::Ignore => false,
@@ -1019,5 +1057,85 @@ mod tests {
             ParsedCommand { target: "t".into(), passthrough: vec!["x".into(), "y".into()] };
         let opts = options_with_passthrough(&base, &cmd_args);
         assert_eq!(opts.passthrough_args, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    /// Helper: build a minimal `TuiState` with one task visible and the
+    /// run already finished, so `x` / `X` are effective.
+    fn finished_state_with_task(task: &str, target: &str) -> TuiState {
+        use broski_core::{ProgressEvent, TaskStatus};
+        use std::time::Duration;
+        let mut s = TuiState::new();
+        s.apply(ProgressEvent::RunStarted {
+            target: target.to_string(),
+            layers: vec![vec![task.to_string()]],
+        });
+        s.apply(ProgressEvent::TaskStarted {
+            task: task.to_string(),
+            mode: broski_core::TaskMode::Graph,
+        });
+        s.apply(ProgressEvent::TaskFinished {
+            task: task.to_string(),
+            status: TaskStatus::Executed,
+            duration: Duration::from_millis(10),
+            error: None,
+            cache_reasons: Vec::new(),
+        });
+        s.apply(ProgressEvent::RunFinished);
+        s
+    }
+
+    #[test]
+    fn force_rerun_selected_sets_pending_rerun_when_finished() {
+        let cancellation = CancellationToken::new();
+        let mut last_interrupt = None;
+        let mut state = finished_state_with_task("lint", "ci");
+        // Cursor is on "lint" (index 0).
+        assert_eq!(state.selected_task(), Some("lint"));
+
+        let quit = apply_action(
+            &mut state,
+            Action::ForceRerunSelected,
+            &cancellation,
+            &mut last_interrupt,
+        );
+        assert!(!quit, "ForceRerunSelected should not quit the loop");
+        assert_eq!(
+            state.pending_rerun,
+            Some(RerunRequest { task: "lint".to_string(), force_all: false })
+        );
+    }
+
+    #[test]
+    fn force_rerun_all_uses_original_target() {
+        let cancellation = CancellationToken::new();
+        let mut last_interrupt = None;
+        let mut state = finished_state_with_task("fmt", "ci");
+
+        let quit =
+            apply_action(&mut state, Action::ForceRerunAll, &cancellation, &mut last_interrupt);
+        assert!(!quit);
+        assert_eq!(
+            state.pending_rerun,
+            Some(RerunRequest { task: "ci".to_string(), force_all: true })
+        );
+    }
+
+    #[test]
+    fn force_rerun_ignored_when_run_still_in_progress() {
+        let cancellation = CancellationToken::new();
+        let mut last_interrupt = None;
+        use broski_core::ProgressEvent;
+        let mut state = TuiState::new();
+        state.apply(ProgressEvent::RunStarted {
+            target: "ci".to_string(),
+            layers: vec![vec!["lint".to_string()]],
+        });
+        // run_finished is still false
+
+        apply_action(&mut state, Action::ForceRerunSelected, &cancellation, &mut last_interrupt);
+        assert!(state.pending_rerun.is_none(), "x during a live run must be ignored");
+
+        apply_action(&mut state, Action::ForceRerunAll, &cancellation, &mut last_interrupt);
+        assert!(state.pending_rerun.is_none(), "X during a live run must be ignored");
     }
 }

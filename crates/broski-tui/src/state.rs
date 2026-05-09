@@ -82,6 +82,17 @@ pub enum CancelState {
     Hard,
 }
 
+/// A pending force-rerun request, set by `x` / `X` after a run finishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerunRequest {
+    /// Target to pass to the next `run_target` call.
+    /// For `x` this is the selected task; for `X` this is the original target.
+    pub task: String,
+    /// When true, set `RunOptions::force = true` (re-run everything).
+    /// When false, set `RunOptions::force_tasks = {task}` (re-run only that node).
+    pub force_all: bool,
+}
+
 /// Full TUI state.
 #[derive(Debug, Default, Clone)]
 pub struct TuiState {
@@ -107,6 +118,9 @@ pub struct TuiState {
     pub etas: BTreeMap<String, Duration>,
     /// Two-stage cancellation state, advanced by the app's Ctrl-C handler.
     pub cancel: CancelState,
+    /// Pending force-rerun request, set by `x` / `X` after `run_finished`.
+    /// Consumed once by the app loop to trigger a new executor run.
+    pub pending_rerun: Option<RerunRequest>,
 }
 
 impl TuiState {
@@ -291,6 +305,14 @@ impl TuiState {
         };
         info.scrollback = 0;
         info.follow_tail = true;
+    }
+
+    /// Set a pending force-rerun only when the run has already finished.
+    /// Silently ignored while a run is still in progress.
+    pub fn request_rerun(&mut self, task: String, force_all: bool) {
+        if self.run_finished {
+            self.pending_rerun = Some(RerunRequest { task, force_all });
+        }
     }
 
     fn selected_task_info_mut(&mut self) -> Option<&mut TaskInfo> {
@@ -583,6 +605,28 @@ mod tests {
         let after = s.tasks["x"].scrollback;
         assert_eq!(after, before.saturating_sub(10), "scrollback must slide with eviction");
         assert!(!s.tasks["x"].follow_tail, "follow_tail must stay off while user is scrolled up");
+    }
+
+    #[test]
+    fn request_rerun_sets_pending_when_run_is_finished() {
+        let mut s = TuiState::new();
+        s.apply(ev_run_started(vec![vec!["lint"]]));
+        s.apply(ProgressEvent::RunFinished);
+        assert!(s.run_finished);
+        s.request_rerun("lint".to_string(), false);
+        assert_eq!(
+            s.pending_rerun,
+            Some(RerunRequest { task: "lint".to_string(), force_all: false })
+        );
+    }
+
+    #[test]
+    fn request_rerun_ignored_when_run_in_progress() {
+        let mut s = TuiState::new();
+        s.apply(ev_run_started(vec![vec!["lint"]]));
+        // run_finished is still false
+        s.request_rerun("lint".to_string(), true);
+        assert!(s.pending_rerun.is_none(), "should not set pending_rerun while run is in progress");
     }
 
     #[test]
