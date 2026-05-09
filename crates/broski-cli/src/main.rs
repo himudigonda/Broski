@@ -90,6 +90,10 @@ enum Command {
         force_isolation: bool,
         #[arg(long)]
         jobs: Option<usize>,
+        /// Compute and surface cache miss reasons inline on each DAG line
+        /// and in the Task detail card.
+        #[arg(long)]
+        explain: bool,
         /// Theme name (default, dark, light, high-contrast). Falls back to
         /// the `BROSKI_THEME` env var, then the default theme.
         #[arg(long, value_name = "NAME")]
@@ -212,10 +216,14 @@ fn run() -> Result<()> {
             }
 
             if tui {
-                if dry_run || explain || watch {
-                    return Err(anyhow!(
-                        "--tui cannot be combined with --dry-run, --explain, or --watch"
-                    ));
+                // `--explain` is now allowed alongside `--tui`: the
+                // dashboard surfaces miss reasons inline on the DAG line
+                // and in the Task detail card. `--dry-run` and `--watch`
+                // still don't make sense in TUI mode (one short-circuits
+                // before any execution; the other expects the watcher to
+                // own the foreground), so they remain mutually exclusive.
+                if dry_run || watch {
+                    return Err(anyhow!("--tui cannot be combined with --dry-run or --watch"));
                 }
                 let theme = resolve_theme(theme.as_deref())?;
                 let summary = broski_tui::run(
@@ -226,7 +234,7 @@ fn run() -> Result<()> {
                     options,
                     theme,
                 )?;
-                emit_run_summary(&summary, false);
+                emit_run_summary(&summary, explain);
                 return Ok(());
             }
 
@@ -235,13 +243,23 @@ fn run() -> Result<()> {
             emit_run_summary(&summary, options.explain);
             Ok(())
         }
-        Some(Command::Tui { task, force, no_cache, force_isolation, jobs, theme, args }) => {
+        Some(Command::Tui {
+            task,
+            force,
+            no_cache,
+            force_isolation,
+            jobs,
+            explain,
+            theme,
+            args,
+        }) => {
             let config = load_and_validate(&workspace)?;
             let cache = LocalArtifactStore::new(cache_root(&workspace))?;
             let mut options = RunOptions {
                 force,
                 no_cache,
                 force_isolation,
+                explain,
                 passthrough_args: args,
                 ..RunOptions::default()
             };

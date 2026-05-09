@@ -3,7 +3,7 @@
 use broski_core::LogStream;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
@@ -41,6 +41,19 @@ impl Widget for LogsWidget<'_> {
         let mut lines: Vec<Line> = Vec::new();
         if let Some(name) = task {
             if let Some(info) = self.state.tasks.get(name) {
+                // Surface cache miss / hit reasons at the top so the
+                // user sees "why did this re-run?" right next to the
+                // actual command output. Only present when the run was
+                // started with `--explain`.
+                if !info.cache_reasons.is_empty() && info.scrollback == 0 {
+                    for reason in &info.cache_reasons {
+                        lines.push(Line::from(Span::styled(
+                            format!("⟶ {}", reason),
+                            Style::default().fg(self.palette.eta).add_modifier(Modifier::ITALIC),
+                        )));
+                    }
+                    lines.push(Line::from(Span::raw("")));
+                }
                 if info.logs.is_empty() {
                     lines.push(empty_message(info, self.palette));
                 } else {

@@ -45,6 +45,9 @@ pub struct TaskInfo {
     /// the bottom on new lines. Flipped off the moment the user scrolls
     /// up; flipped back on when they hit `End` or scroll past the bottom.
     pub follow_tail: bool,
+    /// Cache hit/miss explain reasons captured on `TaskFinished`. Empty
+    /// unless the run was started with `RunOptions::explain` set.
+    pub cache_reasons: Vec<String>,
 }
 
 impl Default for TaskInfo {
@@ -58,6 +61,7 @@ impl Default for TaskInfo {
             logs: VecDeque::new(),
             scrollback: 0,
             follow_tail: true,
+            cache_reasons: Vec::new(),
         }
     }
 }
@@ -182,13 +186,14 @@ impl TuiState {
                     info.scrollback = 0;
                 }
             }
-            ProgressEvent::TaskFinished { task, status, duration, error } => {
+            ProgressEvent::TaskFinished { task, status, duration, error, cache_reasons } => {
                 let info = self.tasks.entry(task).or_default();
                 if info.state == TaskState::Running {
                     self.running_count = self.running_count.saturating_sub(1);
                 }
                 info.duration = duration;
                 info.error = error;
+                info.cache_reasons = cache_reasons;
                 info.current_phase = None;
                 info.state = match status {
                     TaskStatus::Executed => {
@@ -332,6 +337,7 @@ mod tests {
             status: TaskStatus::Executed,
             duration: Duration::from_millis(42),
             error: None,
+            cache_reasons: Vec::new(),
         });
         assert_eq!(s.running_count, 0);
         assert_eq!(s.done_count, 1);
@@ -352,6 +358,7 @@ mod tests {
             status: TaskStatus::CacheHit,
             duration: Duration::from_millis(1),
             error: None,
+            cache_reasons: Vec::new(),
         });
         assert_eq!(s.cached_count, 1);
         assert_eq!(s.done_count, 0);
@@ -371,6 +378,7 @@ mod tests {
             status: TaskStatus::Failed,
             duration: Duration::from_millis(99),
             error: Some("assertion failed".to_string()),
+            cache_reasons: vec!["cache miss: input changed: src/lib.rs".into()],
         });
         assert_eq!(s.failed_count, 1);
         assert_eq!(s.tasks["test"].state, TaskState::Failed);
@@ -440,6 +448,7 @@ mod tests {
             status: TaskStatus::Executed,
             duration: Duration::from_secs(2),
             error: None,
+            cache_reasons: Vec::new(),
         });
         assert_eq!(s.remaining_eta(), Duration::from_secs(8));
 
@@ -453,6 +462,7 @@ mod tests {
             status: TaskStatus::CacheHit,
             duration: Duration::from_millis(5),
             error: None,
+            cache_reasons: Vec::new(),
         });
         assert_eq!(s.remaining_eta(), Duration::from_secs(5));
     }

@@ -154,7 +154,16 @@ pub enum ProgressEvent {
     /// A captured stdout/stderr line. Only emitted when `RunOptions::capture_output` is true.
     LogLine { task: String, stream: LogStream, line: String },
     /// Terminal event for a task. `duration` is sum-of-observed-phases.
-    TaskFinished { task: String, status: TaskStatus, duration: Duration, error: Option<String> },
+    /// `cache_reasons` carries the per-task explain reasons computed by
+    /// the executor (only populated when `RunOptions::explain` was set);
+    /// for cache hits / skipped / dry-run it's empty.
+    TaskFinished {
+        task: String,
+        status: TaskStatus,
+        duration: Duration,
+        error: Option<String>,
+        cache_reasons: Vec<String>,
+    },
     /// Last event of every run.
     RunFinished,
 }
@@ -493,6 +502,7 @@ impl Executor {
                         status: TaskStatus::Skipped,
                         duration: Duration::ZERO,
                         error: None,
+                        cache_reasons: Vec::new(),
                     },
                 );
                 return Ok(TaskOutcome {
@@ -542,6 +552,11 @@ impl Executor {
                             status: TaskStatus::DryRun,
                             duration: Duration::ZERO,
                             error: None,
+                            cache_reasons: if options.explain {
+                                vec!["cache bypass: interactive mode".to_string()]
+                            } else {
+                                Vec::new()
+                            },
                         },
                     );
                 }
@@ -576,6 +591,11 @@ impl Executor {
                         status: TaskStatus::Executed,
                         duration: started_interactive.elapsed(),
                         error: None,
+                        cache_reasons: if options.explain {
+                            vec!["cache bypass: interactive mode".to_string()]
+                        } else {
+                            Vec::new()
+                        },
                     },
                 );
             }
@@ -634,6 +654,7 @@ impl Executor {
                                 status: TaskStatus::DryRun,
                                 duration: task_total_duration(&timings),
                                 error: None,
+                                cache_reasons: Vec::new(),
                             },
                         );
                     }
@@ -662,6 +683,7 @@ impl Executor {
                             status: TaskStatus::CacheHit,
                             duration: task_total_duration(&timings),
                             error: None,
+                            cache_reasons: timing_lines(task_name, &timings, show_timings),
                         },
                     );
                 }
@@ -689,6 +711,7 @@ impl Executor {
                         status: TaskStatus::DryRun,
                         duration: task_total_duration(&timings),
                         error: None,
+                        cache_reasons: cache_miss_reasons.clone(),
                     },
                 );
             }
@@ -735,6 +758,7 @@ impl Executor {
                         status: TaskStatus::Failed,
                         duration: task_total_duration(&timings),
                         error: Some(stderr_tail(&stderr)),
+                        cache_reasons: cache_miss_reasons.clone(),
                     },
                 );
             }
@@ -781,6 +805,13 @@ impl Executor {
                     status: TaskStatus::Executed,
                     duration: task_total_duration(&timings),
                     error: None,
+                    cache_reasons: {
+                        let mut reasons = cache_miss_reasons.clone();
+                        if show_timings {
+                            reasons.extend(timing_lines(task_name, &timings, true));
+                        }
+                        reasons
+                    },
                 },
             );
         }

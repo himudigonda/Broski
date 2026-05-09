@@ -46,6 +46,16 @@ impl Widget for DagWidget<'_> {
                     Span::styled(name.clone(), Style::default().fg(self.palette.fg)),
                 ];
                 if let Some(info) = info {
+                    // Inline state tag when the task has reached a
+                    // terminal state. Helps users quickly distinguish
+                    // "this didn't run because it hit the cache" from
+                    // "this didn't run because cancellation skipped it".
+                    if let Some(tag) = state_tag(info.state) {
+                        spans.push(Span::styled(
+                            format!("  {tag}"),
+                            Style::default().fg(self.palette.cached),
+                        ));
+                    }
                     if !info.duration.is_zero() {
                         spans.push(Span::styled(
                             format!("  {}", format_duration(info.duration)),
@@ -62,6 +72,17 @@ impl Widget for DagWidget<'_> {
                     }
                 }
                 items.push(ListItem::new(Line::from(spans)));
+                // Append an explain reason as a sub-line under the task,
+                // dimmed. Only the first reason is shown to keep the DAG
+                // pane readable; full list lives in the Task detail card.
+                if let Some(info) = info {
+                    if let Some(first) = info.cache_reasons.first() {
+                        items.push(ListItem::new(Line::from(Span::styled(
+                            format!("    ↳ {}", first),
+                            Style::default().fg(self.palette.help).add_modifier(Modifier::ITALIC),
+                        ))));
+                    }
+                }
             }
             if layer_idx + 1 < self.state.layers.len() {
                 items.push(ListItem::new(Line::from(Span::styled(
@@ -99,6 +120,19 @@ fn task_icon(state: Option<TaskState>, palette: &Palette) -> (&'static str, Colo
         Some(TaskState::DryRun) => ("·", palette.queued),
         Some(TaskState::Skipped) => ("⊘", palette.queued),
         Some(TaskState::Queued) | None => ("○", palette.queued),
+    }
+}
+
+/// Inline text tag rendered next to the task name once it reaches a
+/// terminal state. Returns `None` for transient states (Queued/Running)
+/// so the DAG only annotates outcomes, not in-progress work.
+fn state_tag(state: TaskState) -> Option<&'static str> {
+    match state {
+        TaskState::Cached => Some("(cached)"),
+        TaskState::Skipped => Some("(skipped)"),
+        TaskState::DryRun => Some("(dry-run)"),
+        TaskState::Failed => Some("(failed)"),
+        TaskState::Done | TaskState::Running | TaskState::Queued => None,
     }
 }
 
