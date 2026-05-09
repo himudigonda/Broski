@@ -133,10 +133,12 @@ Output reports objects pruned, bytes freed, and remaining size.
 
 Render the run through a live `ratatui`-based dashboard:
 
-- DAG view with per-task state and ETA badges (sourced from the most recent successful execution).
-- Streaming log tail.
+- DAG view with per-task state, inline `(cached)` / `(skipped)` / `(dry-run)` / `(failed)` tags, and ETA badges (sourced from the most recent successful execution).
+- Scrollable log tail (mouse wheel + PageUp/Down + Shift-↑/↓ + Shift-Home/End; auto-follows the tail and locks when you scroll up).
 - Summary bar with aggregate remaining-time and overall status.
 - Two-stage Ctrl-C: first press requests a soft cancel; a second press within two seconds escalates to a hard cancel (`SIGTERM` to all child PIDs) and exits.
+- `--explain` is supported: per-task miss reasons land inline on each DAG line and at the top of the selected task's log pane.
+- Interactive tasks (`@mode interactive`) automatically suspend the dashboard, hand the real TTY to the child via `Stdio::inherit`, and resume the dashboard when the child exits.
 
 #### Launcher mode
 

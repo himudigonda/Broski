@@ -40,6 +40,25 @@ All notable changes to this project are documented in this file.
 - Selectable via `--theme auto`, `BROSKI_THEME=auto`, or `/theme auto` mid-session.
 - Resolution happens before raw mode is engaged so the OSC 11 round-trip uses a cooked stdio pair.
 
+### Added — Scrollable Log Pane
+- The dashboard's log pane is now scrollable: PageUp/PageDown for 10-line jumps, Shift-↑/↓ for 1-line moves, Shift-Home/End for top/tail, mouse wheel for 3-line per notch. Plain ↑/↓ still navigate the task list.
+- Auto-follow tail by default; the moment the user scrolls up the view locks; pressing Shift-End or scrolling fully back down re-engages follow-tail.
+- The log pane title shows `↑N` while scrolled up so it's obvious you're not looking at live output.
+- New `enter_terminal()` enables crossterm's mouse capture; `leave_terminal()` disables it.
+- Eviction-while-scrolled now decrements the scroll offset by 1 so the user's visible region stays stable when the ring buffer drops the oldest line.
+
+### Added — Inline DAG State Tags + Explain Reasons in TUI
+- The DAG widget now annotates terminal-state tasks inline next to their name: `(cached)`, `(skipped)`, `(dry-run)`, `(failed)`. Earlier the only differentiator was the ⊙/⊘ glyphs.
+- `broski tui <task> --explain` and `broski run <task> --tui --explain` are now allowed (the prior mutex relaxed; only `--dry-run` and `--watch` still don't compose with `--tui`). When set, each task line gets a dim sub-line `↳ <first reason>`, and the log pane prepends the full `cache_reasons` list at the top of the selected task's output.
+- `ProgressEvent::TaskFinished` gains a `cache_reasons: Vec<String>` field carrying per-task explain reasons (manifest delta, "cache bypass", timing breakdown). Empty unless `RunOptions::explain` was set.
+- `TuiState::TaskInfo` absorbs the new field and exposes it for any custom renderers.
+
+### Added — Interactive-Task Suspend/Restore
+- When the launcher (or `broski tui <task>`) picks a target whose resolved DAG includes any `@mode interactive` task, the TUI now suspends itself for the duration: leaves raw mode + alt screen + mouse capture, hands the real TTY to the child via `Stdio::inherit`, then restores the dashboard when the child exits.
+- This makes dev servers, REPLs, prompts, and `Ctrl-C` handling work correctly under `broski tui` for the first time. Previously the captured-pipe path would deadlock on prompts.
+- Detection is best-effort via `TaskGraph::build`; unresolvable graphs fall back to the dashboard path conservatively.
+- Embedded PTY in the dashboard (so the DAG stays visible alongside the interactive child) is left as a follow-up — that needs a PTY layer + ANSI parser + bidirectional key forwarding.
+
 ### Added — Stats Panel
 - The launcher's right column now shows live stats cards: workspace path + broski version + git rev + theme, cache size + object count, session counters (total runs · ✓✗⊘ · total time), and per-task detail (description, deps, @in/@out glob counts, last successful run) for whichever task is highlighted.
 - New `ArtifactStore::stats()` returning `StoreStats { object_count, total_bytes }`. `LocalArtifactStore` overrides to walk `.broski/cache/objects/` once.
