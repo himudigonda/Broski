@@ -130,16 +130,50 @@ jobs:
           echo "--- release notes preview ---"
           head -40 release-notes.md
 
-      - name: Create or update release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ env.RELEASE_TAG }}
-          tag_name: ${{ env.RELEASE_TAG }}
-          target_commitish: ${{ github.sha }}
-          draft: false
-          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
-          fail_on_unmatched_files: true
-          body_path: release-notes.md
-          files: |
-            dist/broski-*
-            dist/SHA256SUMS.txt
+      - name: Create release via API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          prerelease="false"
+          case "$tag" in *-*) prerelease="true";; esac
+          python3 - "$tag" "$prerelease" > /tmp/payload.json <<'PYEOF'
+          import json, sys, pathlib
+          tag = sys.argv[1]
+          pre = sys.argv[2] == "true"
+          body = pathlib.Path("release-notes.md").read_text(encoding="utf-8")
+          payload = {
+              "tag_name": tag,
+              "name": tag,
+              "body": body,
+              "draft": False,
+              "prerelease": pre,
+              "make_latest": "false" if pre else "true",
+          }
+          json.dump(payload, sys.stdout)
+          PYEOF
+          create_response=$(curl -fsSL -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload.json \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases")
+          release_id=$(printf "%s" "$create_response" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          upload_url="https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets"
+          echo "Created release id=${release_id}; uploading assets..."
+          for asset in dist/broski-* dist/SHA256SUMS.txt; do
+            [ -f "$asset" ] || continue
+            name=$(basename "$asset")
+            content_type="application/octet-stream"
+            case "$asset" in *.txt) content_type="text/plain";; *.tar.gz) content_type="application/gzip";; esac
+            echo "  uploading $name ..."
+            curl -fsSL -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: ${content_type}" \
+              --data-binary @"$asset" \
+              "${upload_url}?name=${name}" > /dev/null
+          done
+          echo "Release ${tag} published with body length $(wc -c < release-notes.md) bytes."
