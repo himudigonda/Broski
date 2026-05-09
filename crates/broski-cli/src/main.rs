@@ -76,9 +76,12 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
-    /// Launch the live ratatui dashboard for a task.
+    /// Launch the live ratatui dashboard. With no task, opens a launcher
+    /// where you pick or type targets and watch them run; each finished run
+    /// pops back to the launcher so you can run the next one.
     Tui {
-        task: String,
+        /// Optional task name. Omit to enter the interactive launcher.
+        task: Option<String>,
         #[arg(long)]
         force: bool,
         #[arg(long)]
@@ -246,13 +249,32 @@ fn run() -> Result<()> {
                 options.jobs = j.max(1);
             }
             let theme = resolve_theme(theme.as_deref())?;
-            let summary =
-                broski_tui::run(workspace.clone(), config, Arc::new(cache), task, options, theme)?;
-            if !summary.cache_hits.is_empty() {
-                println!("cache hits: {}", summary.cache_hits.join(", "));
-            }
-            if !summary.executed.is_empty() {
-                println!("executed: {}", summary.executed.join(", "));
+            match task {
+                Some(t) => {
+                    let summary = broski_tui::run(
+                        workspace.clone(),
+                        config,
+                        Arc::new(cache),
+                        t,
+                        options,
+                        theme,
+                    )?;
+                    if !summary.cache_hits.is_empty() {
+                        println!("cache hits: {}", summary.cache_hits.join(", "));
+                    }
+                    if !summary.executed.is_empty() {
+                        println!("executed: {}", summary.executed.join(", "));
+                    }
+                }
+                None => {
+                    broski_tui::run_launcher(
+                        workspace.clone(),
+                        config,
+                        Arc::new(cache),
+                        options,
+                        theme,
+                    )?;
+                }
             }
             Ok(())
         }

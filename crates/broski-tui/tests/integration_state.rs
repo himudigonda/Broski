@@ -155,3 +155,79 @@ fn prefetch_skips_tasks_without_history() {
     let fetched = cache.fetch_latest_execution("stale").expect("fetch").expect("present");
     assert_eq!(fetched.duration_ms, 0);
 }
+
+#[test]
+fn launcher_full_session_filter_select_run_clear() {
+    use broski_tui::{LauncherAction, LauncherDecision, LauncherState, ParsedCommand, RunOutcome};
+
+    let mut launcher =
+        LauncherState::new(vec!["build".into(), "test".into(), "lint".into(), "fmt".into()]);
+    // Filter preserves the input order (which mirrors the BroskiFile's
+    // BTreeMap order in production).
+    assert_eq!(launcher.filtered_tasks(), vec!["build", "test", "lint", "fmt"]);
+
+    // User types "te" — only "test" matches.
+    for c in "te".chars() {
+        assert_eq!(launcher.apply(LauncherAction::InsertChar(c)), LauncherDecision::Continue);
+    }
+    assert_eq!(launcher.filtered_tasks(), vec!["test"]);
+
+    // Enter dispatches "test".
+    let decision = launcher.apply(LauncherAction::Enter);
+    assert_eq!(
+        decision,
+        LauncherDecision::Run(ParsedCommand { target: "test".into(), passthrough: vec![] })
+    );
+
+    // Simulate the run finishing and the launcher being told about it.
+    launcher.record_run("test".into(), RunOutcome::Success, Duration::from_millis(421));
+    assert_eq!(launcher.history.len(), 1);
+    assert_eq!(launcher.history[0].target, "test");
+    assert!(launcher.input.is_empty(), "input should reset after a recorded run");
+    let banner = launcher.status.as_deref().unwrap_or("");
+    assert!(banner.contains("ran test") && banner.contains("421ms"), "banner = {banner}");
+
+    // Next user keystroke clears the banner.
+    launcher.apply(LauncherAction::Down);
+    assert!(launcher.status.is_none());
+
+    // Esc clears the input even when there is none — non-destructive on the
+    // history we just recorded.
+    launcher.apply(LauncherAction::ClearInput);
+    assert_eq!(launcher.history.len(), 1);
+
+    // Quit on empty input ends the session.
+    assert_eq!(launcher.apply(LauncherAction::Quit), LauncherDecision::Quit);
+}
+
+#[test]
+fn launcher_rejects_unknown_target_with_status_banner() {
+    use broski_tui::{LauncherAction, LauncherDecision, LauncherState};
+
+    let mut launcher = LauncherState::new(vec!["fmt".into()]);
+    for c in "nope".chars() {
+        launcher.apply(LauncherAction::InsertChar(c));
+    }
+    assert_eq!(launcher.apply(LauncherAction::Enter), LauncherDecision::Continue);
+    assert!(launcher.status.as_deref().unwrap_or("").contains("no task matches"));
+    // Input is preserved so the user can edit it.
+    assert_eq!(launcher.input, "nope");
+}
+
+#[test]
+fn launcher_passthrough_args_round_trip_through_parsed_command() {
+    use broski_tui::{LauncherAction, LauncherDecision, LauncherState, ParsedCommand};
+
+    let mut launcher = LauncherState::new(vec!["test".into()]);
+    for c in "test -- --grep slow".chars() {
+        launcher.apply(LauncherAction::InsertChar(c));
+    }
+    let decision = launcher.apply(LauncherAction::Enter);
+    assert_eq!(
+        decision,
+        LauncherDecision::Run(ParsedCommand {
+            target: "test".into(),
+            passthrough: vec!["--grep".into(), "slow".into()],
+        })
+    );
+}

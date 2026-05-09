@@ -8,12 +8,14 @@
 //! Public entrypoint: [`run`]. The CLI's `broski tui <task>` calls into it.
 
 pub mod keys;
+pub mod launcher;
 pub mod state;
 pub mod theme;
 pub mod widgets;
 
 mod app;
 
-pub use app::run;
+pub use app::{run, run_launcher};
+pub use launcher::{LauncherAction, LauncherDecision, LauncherState, ParsedCommand, RunOutcome};
 pub use state::{CancelState, LogLineRecord, TaskState, TuiState};
 pub use theme::{Palette, Theme};

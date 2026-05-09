@@ -21,6 +21,13 @@ All notable changes to this project are documented in this file.
 - TUI two-stage Ctrl-C: the first press requests a soft cancel, a second press within two seconds escalates to hard and exits. Status bar reflects `CANCELLING` → `TERMINATING` → `CANCELLED`.
 - `RunSummary` now carries a `skipped: Vec<String>` for tasks that were dequeued by cancellation.
 
+### Added — TUI Launcher / REPL Mode
+- `broski tui` (no task argument) now opens an interactive launcher: filterable task list, free-form input box, recent-run history, and a status banner. Pick or type a target, hit Enter, watch it run through the dashboard, and pop back to the launcher.
+- Smart Enter: typing a substring filters the task list and dispatches the highlighted match — no need to type the full name.
+- Tab completes the input from the highlighted task; `Esc` / `Ctrl-U` clear the input; `q` / `Ctrl-C` exit (only when the input is empty, so you can't accidentally quit mid-edit).
+- Inline `-- args` in the input box are forwarded to the task as passthrough arguments (e.g. `test -- --grep slow`).
+- Private tasks are hidden from the launcher list.
+
 ### Added — `broski history` Command
 - `broski history` lists the most recent successful execution per task (newest first, with relative-time and duration columns).
 - `broski history <task> --limit N` lists the last N runs for a single task with absolute-time, duration, and short-fingerprint columns.
@@ -28,6 +35,9 @@ All notable changes to this project are documented in this file.
 ### Added — Versioned Cache Records
 - `ExecutionRecord` gains `duration_ms: u64`. SQLite migration adds the column with `DEFAULT 0` for existing rows; the field is `#[serde(default)]` for forward compat.
 - `ArtifactStore` trait gains `fetch_history(task: Option<&str>, limit: usize)` for the history command and the TUI ETA prefetch.
+
+### Fixed — Workspace Broskifile Staging
+- The dogfood `broskifile` previously listed `crates/**/*.rs` in `@in` for `fmt`/`lint`/`test`/`cov` but not `crates/**/Cargo.toml`, so cargo's recursive workspace lookup failed inside `.broski/stage/...`. `@in` now includes per-crate manifests.
 
 ### Fixed — Validator Version Drift
 - Replaced the hard-coded `"0.1" | … | "0.5"` allowlist with a derived ceiling from `CARGO_PKG_VERSION`. Broskifiles declaring `0.6` or `0.7` now validate cleanly against the v0.7.0 binary; future minor bumps are accepted without a validator edit.

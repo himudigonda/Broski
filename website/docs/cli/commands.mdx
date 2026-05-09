@@ -129,7 +129,7 @@ broski cache prune --max-size 512
 
 Output reports objects pruned, bytes freed, and remaining size.
 
-### `broski tui <task>` and `broski run <task> --tui`
+### `broski tui [task]` and `broski run <task> --tui`
 
 Render the run through a live `ratatui`-based dashboard:
 
@@ -138,10 +138,21 @@ Render the run through a live `ratatui`-based dashboard:
 - Summary bar with aggregate remaining-time and overall status.
 - Two-stage Ctrl-C: first press requests a soft cancel; a second press within two seconds escalates to a hard cancel (`SIGTERM` to all child PIDs) and exits.
 
+#### Launcher mode
+
+Run `broski tui` with no task to enter the interactive launcher:
+
+- Filterable task list (type-ahead substring match, case-insensitive).
+- Free-form input box; `--` in the input forwards trailing tokens as task passthrough args.
+- Tab completes the input from the highlighted task; Esc/Ctrl-U clears.
+- Enter runs the typed target — or the highlighted match if the input is a partial substring — then pops back to the launcher with a status banner and a recent-runs list.
+- `q` / Ctrl-C exit only when the input is empty.
+
 Theme selection:
 
 ```bash
-broski tui ci --theme dark
+broski tui                                 # launcher
+broski tui ci --theme dark                 # straight to a target
 broski run ci --tui --theme high-contrast
 BROSKI_THEME=light broski tui ci
 ```

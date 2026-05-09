@@ -1,7 +1,7 @@
 version = "0.5"
 
 fmt:
-    @in Cargo.toml Cargo.lock rustfmt.toml crates/**/*.rs
+    @in Cargo.toml Cargo.lock rustfmt.toml crates/**/Cargo.toml crates/**/*.rs
     @out .broski/stamps/fmt.ok
     @isolation off
     mkdir -p .broski/stamps
@@ -9,7 +9,7 @@ fmt:
     printf 'ok\n' > .broski/stamps/fmt.ok
 
 lint: fmt
-    @in Cargo.toml Cargo.lock clippy.toml crates/**/*.rs
+    @in Cargo.toml Cargo.lock clippy.toml crates/**/Cargo.toml crates/**/*.rs
     @out .broski/stamps/lint.ok
     @isolation off
     mkdir -p .broski/stamps
@@ -17,7 +17,7 @@ lint: fmt
     printf 'ok\n' > .broski/stamps/lint.ok
 
 test: lint
-    @in Cargo.toml Cargo.lock crates/**/*.rs crates/**/tests/**/*.rs
+    @in Cargo.toml Cargo.lock crates/**/Cargo.toml crates/**/*.rs crates/**/tests/**/*.rs
     @out .broski/stamps/test.ok
     @isolation off
     mkdir -p .broski/stamps
@@ -29,7 +29,7 @@ test: lint
     printf 'ok\n' > .broski/stamps/test.ok
 
 cov: test
-    @in Cargo.toml Cargo.lock crates/**/*.rs
+    @in Cargo.toml Cargo.lock crates/**/Cargo.toml crates/**/*.rs
     @out .broski/stamps/cov.ok
     @isolation off
     mkdir -p .broski/stamps
