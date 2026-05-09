@@ -17,7 +17,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use broski_core::cancel::{CancelLevel, CancellationToken};
-use broski_core::{BroskiFile, Executor, ProgressEvent, RunOptions, RunSummary, TaskGraph};
+use broski_core::{
+    load_broskifile, validate_broskifile, BroskiFile, Executor, ProgressEvent, RunOptions,
+    RunSummary, TaskGraph,
+};
 use broski_store::ArtifactStore;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -98,15 +101,17 @@ fn drive_launcher(
     base_options: &RunOptions,
     theme: Theme,
 ) -> Result<()> {
-    let palette = theme.palette();
-    let theme_name = theme.name().to_string();
+    let mut current_theme = theme;
+    let mut palette = current_theme.palette();
     let workspace_display = workspace.display().to_string();
-    let mut launcher = LauncherState::new(visible_task_names(config));
+    let mut current_config = config.clone();
+    let mut launcher = LauncherState::new(visible_task_names(&current_config));
     let tick = Duration::from_millis(TICK_MS);
     let mut dirty = true;
 
     loop {
         if dirty {
+            let theme_name = current_theme.name().to_string();
             redraw_launcher(terminal, &launcher, &palette, &workspace_display, &theme_name)?;
             dirty = false;
         }
@@ -126,7 +131,7 @@ fn drive_launcher(
                         let outcome = match run_target_in_terminal(
                             terminal,
                             workspace.to_path_buf(),
-                            config.clone(),
+                            current_config.clone(),
                             store.clone(),
                             &cmd.target,
                             options_with_passthrough(base_options, &cmd),
@@ -138,12 +143,64 @@ fn drive_launcher(
                         launcher.record_run(cmd.target, outcome, started.elapsed());
                         dirty = true;
                     }
+                    LauncherDecision::SwitchTheme(requested) => {
+                        // `Auto` is resolved here because we already own
+                        // the terminal — terminal-light handles raw-mode
+                        // toggling internally for the OSC 11 round-trip.
+                        let resolved = requested.resolved();
+                        current_theme = resolved;
+                        palette = resolved.palette();
+                        launcher.record_status(format!(
+                            "theme: {} (was {})",
+                            resolved.name(),
+                            requested.name()
+                        ));
+                        dirty = true;
+                    }
+                    LauncherDecision::Refresh => {
+                        match reload_broskifile(workspace) {
+                            Ok(reloaded) => {
+                                current_config = reloaded;
+                                launcher.replace_tasks(visible_task_names(&current_config));
+                                launcher.record_status("reloaded broskifile");
+                            }
+                            Err(err) => {
+                                launcher.record_status(format!("refresh failed: {err}"));
+                            }
+                        }
+                        dirty = true;
+                    }
+                    LauncherDecision::PruneCache(mb) => {
+                        match store.prune(mb) {
+                            Ok(report) => {
+                                let mb_freed = report.removed_bytes / (1024 * 1024);
+                                launcher.record_status(format!(
+                                    "pruned {} object(s), freed ~{} MB, remaining ~{} MB",
+                                    report.removed_objects,
+                                    mb_freed,
+                                    report.remaining_bytes / (1024 * 1024),
+                                ));
+                            }
+                            Err(err) => {
+                                launcher.record_status(format!("prune failed: {err}"));
+                            }
+                        }
+                        dirty = true;
+                    }
                 }
             }
             Event::Resize(_, _) => dirty = true,
             _ => {}
         }
     }
+}
+
+fn reload_broskifile(workspace: &Path) -> Result<BroskiFile> {
+    let path = workspace.join("broskifile");
+    let config = load_broskifile(&path).with_context(|| format!("reloading {}", path.display()))?;
+    validate_broskifile(&config, workspace)
+        .with_context(|| format!("validating {}", path.display()))?;
+    Ok(config)
 }
 
 fn options_with_passthrough(base: &RunOptions, cmd: &ParsedCommand) -> RunOptions {

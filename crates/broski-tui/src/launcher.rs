@@ -12,6 +12,8 @@
 
 use std::time::Duration;
 
+use crate::theme::Theme;
+
 /// Result of folding an action into the launcher state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LauncherDecision {
@@ -21,7 +23,53 @@ pub enum LauncherDecision {
     Run(ParsedCommand),
     /// Tear down the TUI and exit.
     Quit,
+    /// Switch the active theme without exiting.
+    SwitchTheme(Theme),
+    /// Re-load `broskifile` from disk; the app loop is responsible for
+    /// rebuilding the task list and refreshing cache stats.
+    Refresh,
+    /// Invoke `ArtifactStore::prune(mb)`; the app loop reports the result
+    /// back via [`LauncherState::record_status`].
+    PruneCache(u64),
 }
+
+/// One of the launcher's two text-input modes:
+/// - **Filter**: typed characters narrow the task list; Enter runs the
+///   highlighted (or typed) task.
+/// - **Slash**: input begins with `/`; the right column shows the
+///   slash-command suggestion list and Enter dispatches that command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherMode {
+    Filter,
+    Slash,
+}
+
+/// One of the slash commands the launcher recognizes. Every invocation
+/// returns either a [`LauncherDecision`] or a status banner — the parser
+/// here is exhaustive so unknown commands surface a clear message rather
+/// than silently no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlashCommand {
+    Help,
+    Theme(Theme),
+    About,
+    Clear,
+    Refresh,
+    PruneCache(u64),
+    Quit,
+}
+
+/// Static catalog of slash commands shown in the suggestion panel and used
+/// for Tab completion.
+pub const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/help", "show key map and slash commands"),
+    ("/theme", "switch theme: default | dark | light | high-contrast | auto"),
+    ("/about", "show broski version, workspace, git rev"),
+    ("/clear", "clear the in-session run history"),
+    ("/refresh", "reload broskifile and refresh cache stats"),
+    ("/cache prune <MB>", "prune cache to a size budget"),
+    ("/quit", "exit the launcher (alias: /q)"),
+];
 
 /// A target name plus optional `-- <args>` passthrough, parsed from the
 /// input box.
@@ -66,6 +114,17 @@ pub enum LauncherAction {
     Ignore,
 }
 
+/// Outcome counters surfaced in the launcher's stats panel and used for
+/// the "5 runs · 4✓ 1✗" string.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionStats {
+    pub total_runs: usize,
+    pub successes: usize,
+    pub failures: usize,
+    pub cancellations: usize,
+    pub total_duration: Duration,
+}
+
 /// The launcher's full state. Held by the app loop and rendered each tick.
 #[derive(Debug, Clone)]
 pub struct LauncherState {
@@ -73,19 +132,32 @@ pub struct LauncherState {
     pub input: String,
     /// All non-private task names in display order.
     pub all_tasks: Vec<String>,
-    /// Index into [`filtered_tasks`] of the currently-highlighted match.
-    /// `None` when there are no matches.
+    /// Index into [`filtered_tasks`] (or [`filtered_slash_commands`] in
+    /// `Slash` mode) of the currently-highlighted match. `None` when the
+    /// filtered list is empty.
     pub selected: Option<usize>,
     /// Recent runs from this launcher session, newest first.
     pub history: Vec<RunHistoryEntry>,
     /// Transient banner ("ran X in 1.2s", "no task matches 'fooo'", etc.).
     pub status: Option<String>,
+    /// Current input mode (filter vs. slash command).
+    pub mode: LauncherMode,
+    /// Aggregated session counters.
+    pub stats: SessionStats,
 }
 
 impl LauncherState {
     pub fn new(all_tasks: Vec<String>) -> Self {
         let selected = if all_tasks.is_empty() { None } else { Some(0) };
-        Self { input: String::new(), all_tasks, selected, history: Vec::new(), status: None }
+        Self {
+            input: String::new(),
+            all_tasks,
+            selected,
+            history: Vec::new(),
+            status: None,
+            mode: LauncherMode::Filter,
+            stats: SessionStats::default(),
+        }
     }
 
     /// The visible task list given the current input filter.
@@ -143,13 +215,57 @@ impl LauncherState {
         filtered.get(idx).copied()
     }
 
-    /// Clamp `selected` into `0..filtered.len()` after an input edit.
+    /// The slash-command label under the cursor (only meaningful in
+    /// `Slash` mode).
+    pub fn highlighted_slash(&self) -> Option<&'static str> {
+        let filtered = self.filtered_slash_commands();
+        let idx = self.selected?;
+        filtered.get(idx).copied()
+    }
+
+    /// Slash-command suggestions filtered by the input (which always
+    /// starts with `/`). The leading `/` is part of the needle, so typing
+    /// `/th` narrows to `/theme`.
+    pub fn filtered_slash_commands(&self) -> Vec<&'static str> {
+        let needle = self.input.trim().to_ascii_lowercase();
+        SLASH_COMMANDS
+            .iter()
+            .filter(|(label, _)| {
+                let label = (*label).to_ascii_lowercase();
+                needle.is_empty() || label.starts_with(&needle) || needle.starts_with(&label)
+            })
+            .map(|(label, _)| *label)
+            .collect()
+    }
+
+    /// Length of whichever filtered list is active in the current mode.
+    fn active_list_len(&self) -> usize {
+        match self.mode {
+            LauncherMode::Filter => self.filtered_tasks().len(),
+            LauncherMode::Slash => self.filtered_slash_commands().len(),
+        }
+    }
+
+    /// Clamp `selected` into `0..len` for the active mode after an edit.
     fn reclamp_selection(&mut self) {
-        let len = self.filtered_tasks().len();
+        let len = self.active_list_len();
         if len == 0 {
             self.selected = None;
         } else {
             self.selected = Some(self.selected.map_or(0, |i| i.min(len - 1)));
+        }
+    }
+
+    /// Update [`mode`] and reset the cursor based on whether `input`
+    /// currently begins with `/`.
+    fn refresh_mode(&mut self) {
+        let new_mode =
+            if self.input.starts_with('/') { LauncherMode::Slash } else { LauncherMode::Filter };
+        if new_mode != self.mode {
+            self.mode = new_mode;
+            self.selected = if self.active_list_len() == 0 { None } else { Some(0) };
+        } else {
+            self.reclamp_selection();
         }
     }
 
@@ -162,12 +278,12 @@ impl LauncherState {
         match action {
             LauncherAction::InsertChar(c) => {
                 self.input.push(c);
-                self.reclamp_selection();
+                self.refresh_mode();
                 LauncherDecision::Continue
             }
             LauncherAction::Backspace => {
                 self.input.pop();
-                self.reclamp_selection();
+                self.refresh_mode();
                 LauncherDecision::Continue
             }
             LauncherAction::ClearInput => {
@@ -175,12 +291,12 @@ impl LauncherState {
                     LauncherDecision::Continue
                 } else {
                     self.input.clear();
-                    self.reclamp_selection();
+                    self.refresh_mode();
                     LauncherDecision::Continue
                 }
             }
             LauncherAction::Up => {
-                let len = self.filtered_tasks().len();
+                let len = self.active_list_len();
                 if len > 0 {
                     self.selected = Some(match self.selected {
                         Some(i) if i > 0 => i - 1,
@@ -190,7 +306,7 @@ impl LauncherState {
                 LauncherDecision::Continue
             }
             LauncherAction::Down => {
-                let len = self.filtered_tasks().len();
+                let len = self.active_list_len();
                 if len > 0 {
                     self.selected = Some(match self.selected {
                         Some(i) if i + 1 < len => i + 1,
@@ -200,55 +316,44 @@ impl LauncherState {
                 LauncherDecision::Continue
             }
             LauncherAction::Home => {
-                if !self.filtered_tasks().is_empty() {
+                if self.active_list_len() > 0 {
                     self.selected = Some(0);
                 }
                 LauncherDecision::Continue
             }
             LauncherAction::End => {
-                let len = self.filtered_tasks().len();
+                let len = self.active_list_len();
                 if len > 0 {
                     self.selected = Some(len - 1);
                 }
                 LauncherDecision::Continue
             }
-            LauncherAction::Complete => {
-                if let Some(target) = self.highlighted_task().map(str::to_string) {
-                    self.input = target;
-                    self.reclamp_selection();
-                }
-                LauncherDecision::Continue
-            }
-            LauncherAction::Enter => match self.parse_command() {
-                Some(cmd) => {
-                    if self.all_tasks.contains(&cmd.target) {
-                        return LauncherDecision::Run(cmd);
+            LauncherAction::Complete => match self.mode {
+                LauncherMode::Filter => {
+                    if let Some(target) = self.highlighted_task().map(str::to_string) {
+                        self.input = target;
+                        self.refresh_mode();
                     }
-                    // Typed target doesn't exactly match a task, but the
-                    // filter may have narrowed to one — fall back to the
-                    // highlighted match, preserving any `-- args` the user
-                    // typed.
-                    if let Some(highlighted) = self.highlighted_task().map(str::to_string) {
-                        return LauncherDecision::Run(ParsedCommand {
-                            target: highlighted,
-                            passthrough: cmd.passthrough,
-                        });
-                    }
-                    self.status =
-                        Some(format!("no task matches '{}' — pick one from the list", cmd.target));
                     LauncherDecision::Continue
                 }
-                None => {
-                    self.status = Some("type a task name or pick one with ↑/↓".to_string());
+                LauncherMode::Slash => {
+                    if let Some(label) = self.highlighted_slash() {
+                        self.input = canonical_slash_input(label);
+                        self.refresh_mode();
+                    }
                     LauncherDecision::Continue
                 }
+            },
+            LauncherAction::Enter => match self.mode {
+                LauncherMode::Filter => self.dispatch_filter_enter(),
+                LauncherMode::Slash => self.dispatch_slash_enter(),
             },
             LauncherAction::Quit => {
                 if self.input.is_empty() {
                     LauncherDecision::Quit
                 } else {
                     self.input.clear();
-                    self.reclamp_selection();
+                    self.refresh_mode();
                     LauncherDecision::Continue
                 }
             }
@@ -256,15 +361,107 @@ impl LauncherState {
         }
     }
 
+    fn dispatch_filter_enter(&mut self) -> LauncherDecision {
+        match self.parse_command() {
+            Some(cmd) => {
+                if self.all_tasks.contains(&cmd.target) {
+                    return LauncherDecision::Run(cmd);
+                }
+                if let Some(highlighted) = self.highlighted_task().map(str::to_string) {
+                    return LauncherDecision::Run(ParsedCommand {
+                        target: highlighted,
+                        passthrough: cmd.passthrough,
+                    });
+                }
+                self.status =
+                    Some(format!("no task matches '{}' — pick one from the list", cmd.target));
+                LauncherDecision::Continue
+            }
+            None => {
+                self.status = Some("type a task name or pick one with ↑/↓".to_string());
+                LauncherDecision::Continue
+            }
+        }
+    }
+
+    fn dispatch_slash_enter(&mut self) -> LauncherDecision {
+        match parse_slash_command(&self.input) {
+            Ok(SlashCommand::Help) => {
+                self.status = Some(slash_help_text());
+                self.input.clear();
+                self.refresh_mode();
+                LauncherDecision::Continue
+            }
+            Ok(SlashCommand::Theme(theme)) => {
+                self.input.clear();
+                self.refresh_mode();
+                LauncherDecision::SwitchTheme(theme)
+            }
+            Ok(SlashCommand::About) => {
+                self.status = Some(format!("broski {}", env!("CARGO_PKG_VERSION")));
+                self.input.clear();
+                self.refresh_mode();
+                LauncherDecision::Continue
+            }
+            Ok(SlashCommand::Clear) => {
+                self.history.clear();
+                self.stats = SessionStats::default();
+                self.status = Some("cleared session history".to_string());
+                self.input.clear();
+                self.refresh_mode();
+                LauncherDecision::Continue
+            }
+            Ok(SlashCommand::Refresh) => {
+                self.input.clear();
+                self.refresh_mode();
+                LauncherDecision::Refresh
+            }
+            Ok(SlashCommand::PruneCache(mb)) => {
+                self.input.clear();
+                self.refresh_mode();
+                LauncherDecision::PruneCache(mb)
+            }
+            Ok(SlashCommand::Quit) => LauncherDecision::Quit,
+            Err(msg) => {
+                self.status = Some(msg);
+                LauncherDecision::Continue
+            }
+        }
+    }
+
+    /// Set the status banner. Used by the app loop to surface results of
+    /// `Refresh` / `PruneCache` decisions back to the user.
+    pub fn record_status(&mut self, msg: impl Into<String>) {
+        self.status = Some(msg.into());
+    }
+
+    /// Replace the task list (called after `/refresh`).
+    pub fn replace_tasks(&mut self, all_tasks: Vec<String>) {
+        self.all_tasks = all_tasks;
+        self.refresh_mode();
+    }
+
     /// Record a finished run, then clear the input box so the user can
     /// pick a new target. Newest entries land at index 0 and the list is
-    /// capped at 16.
+    /// capped at 16. Also bumps [`SessionStats`].
     pub fn record_run(&mut self, target: String, outcome: RunOutcome, duration: Duration) {
         let entry = RunHistoryEntry { target: target.clone(), outcome: outcome.clone(), duration };
+        self.stats.total_runs += 1;
+        self.stats.total_duration =
+            self.stats.total_duration.checked_add(duration).unwrap_or(self.stats.total_duration);
         let label = match outcome {
-            RunOutcome::Success => "ran",
-            RunOutcome::Failed => "failed",
-            RunOutcome::Cancelled => "cancelled",
+            RunOutcome::Success => {
+                self.stats.successes += 1;
+                "ran"
+            }
+            RunOutcome::Failed => {
+                self.stats.failures += 1;
+                "failed"
+            }
+            RunOutcome::Cancelled => {
+                self.stats.cancellations += 1;
+                "cancelled"
+            }
         };
         self.status = Some(format!("{} {} in {}", label, target, format_dur(duration)));
         self.history.insert(0, entry);
@@ -272,7 +469,68 @@ impl LauncherState {
             self.history.truncate(16);
         }
         self.input.clear();
-        self.reclamp_selection();
+        self.refresh_mode();
+    }
+}
+
+/// Parse the input box's current text as a slash command, returning either
+/// a [`SlashCommand`] or a human-readable error suitable for the status
+/// banner.
+pub fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
+    let trimmed = input.trim();
+    let body = trimmed
+        .strip_prefix('/')
+        .ok_or_else(|| "expected a slash command starting with '/'".to_string())?;
+    let mut tokens = body.split_whitespace();
+    let head = tokens.next().unwrap_or("").to_ascii_lowercase();
+    match head.as_str() {
+        "help" | "h" | "?" => Ok(SlashCommand::Help),
+        "quit" | "q" | "exit" => Ok(SlashCommand::Quit),
+        "about" | "version" => Ok(SlashCommand::About),
+        "clear" => Ok(SlashCommand::Clear),
+        "refresh" | "reload" => Ok(SlashCommand::Refresh),
+        "theme" => match tokens.next() {
+            Some(name) => name
+                .parse::<Theme>()
+                .map(SlashCommand::Theme)
+                .map_err(|_| format!("unknown theme '{}' — try /help", name)),
+            None => Err("usage: /theme <default|dark|light|high-contrast|auto>".to_string()),
+        },
+        "cache" => match tokens.next().map(str::to_ascii_lowercase).as_deref() {
+            Some("prune") => match tokens.next() {
+                Some(mb) => mb
+                    .parse::<u64>()
+                    .map(SlashCommand::PruneCache)
+                    .map_err(|_| format!("expected a megabyte budget, got '{}'", mb)),
+                None => Err("usage: /cache prune <MB>".to_string()),
+            },
+            Some(other) => Err(format!("unknown cache subcommand '{}' — try /help", other)),
+            None => Err("usage: /cache prune <MB>".to_string()),
+        },
+        other => Err(format!("unknown command '/{}' — try /help", other)),
+    }
+}
+
+/// Multi-line key map shown by `/help`.
+fn slash_help_text() -> String {
+    let mut out = String::from("commands:");
+    for (label, desc) in SLASH_COMMANDS {
+        out.push_str(&format!("  {label} — {desc}"));
+    }
+    out
+}
+
+/// Canonical input form for a tab-completed slash command. `/cache prune`
+/// keeps the trailing space so the user can type the MB budget right
+/// away; commands with arguments end in `" "`, argument-less commands do
+/// not.
+fn canonical_slash_input(label: &str) -> String {
+    if label.starts_with("/theme") {
+        "/theme ".to_string()
+    } else if label.starts_with("/cache") {
+        "/cache prune ".to_string()
+    } else {
+        label.split_whitespace().next().unwrap_or(label).to_string()
     }
 }
 
@@ -559,5 +817,222 @@ mod tests {
         assert_eq!(filter_needle("test -- --grep slow"), "test");
         assert_eq!(filter_needle("  fmt  "), "fmt");
         assert_eq!(filter_needle("--all"), "--all");
+    }
+
+    // -------- slash command tests --------
+
+    #[test]
+    fn slash_mode_engages_on_leading_slash() {
+        let mut l = LauncherState::new(s(&["fmt", "lint"]));
+        assert_eq!(l.mode, LauncherMode::Filter);
+        l.apply(LauncherAction::InsertChar('/'));
+        assert_eq!(l.mode, LauncherMode::Slash);
+        assert!(!l.filtered_slash_commands().is_empty());
+        l.apply(LauncherAction::Backspace);
+        assert_eq!(l.mode, LauncherMode::Filter);
+    }
+
+    #[test]
+    fn slash_typing_narrows_command_list() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/th".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        let filtered = l.filtered_slash_commands();
+        assert_eq!(filtered, vec!["/theme"]);
+    }
+
+    #[test]
+    fn slash_help_dispatches_help_decision_with_status() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/help".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Continue);
+        let banner = l.status.as_deref().unwrap_or("");
+        assert!(banner.contains("/theme"), "banner should list commands; got: {banner}");
+        assert!(l.input.is_empty());
+    }
+
+    #[test]
+    fn slash_theme_dispatches_switch_with_parsed_theme() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/theme dark".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::SwitchTheme(Theme::Dark));
+        assert_eq!(l.mode, LauncherMode::Filter);
+        assert!(l.input.is_empty());
+    }
+
+    #[test]
+    fn slash_theme_unknown_returns_status_banner() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/theme neon".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Continue);
+        assert!(l.status.as_deref().unwrap_or("").contains("unknown theme"));
+        // Input is preserved so the user can edit it.
+        assert!(l.input.starts_with("/theme"));
+    }
+
+    #[test]
+    fn slash_theme_without_arg_shows_usage() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/theme".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Continue);
+        assert!(l.status.as_deref().unwrap_or("").contains("usage:"));
+    }
+
+    #[test]
+    fn slash_quit_dispatches_quit() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/quit".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Quit);
+        // /q alias too.
+        let mut l2 = LauncherState::new(s(&["fmt"]));
+        for c in "/q".chars() {
+            l2.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l2.apply(LauncherAction::Enter), LauncherDecision::Quit);
+    }
+
+    #[test]
+    fn slash_clear_clears_history_and_resets_stats() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        l.record_run("fmt".into(), RunOutcome::Success, Duration::from_millis(10));
+        l.record_run("fmt".into(), RunOutcome::Failed, Duration::from_millis(5));
+        assert_eq!(l.history.len(), 2);
+        assert_eq!(l.stats.total_runs, 2);
+        for c in "/clear".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Continue);
+        assert!(l.history.is_empty());
+        assert_eq!(l.stats, SessionStats::default());
+    }
+
+    #[test]
+    fn slash_refresh_dispatches_refresh_decision() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/refresh".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Refresh);
+    }
+
+    #[test]
+    fn slash_cache_prune_parses_megabytes() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/cache prune 256".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::PruneCache(256));
+    }
+
+    #[test]
+    fn slash_cache_prune_invalid_arg_shows_status() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/cache prune lots".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Continue);
+        assert!(l.status.as_deref().unwrap_or("").contains("expected"));
+    }
+
+    #[test]
+    fn slash_cache_without_subcommand_shows_usage() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/cache".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Continue);
+        assert!(l.status.as_deref().unwrap_or("").contains("usage:"));
+    }
+
+    #[test]
+    fn slash_unknown_command_shows_banner() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/wat".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Continue);
+        assert!(l.status.as_deref().unwrap_or("").contains("unknown command"));
+    }
+
+    #[test]
+    fn slash_about_emits_status_with_version() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/about".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.apply(LauncherAction::Enter), LauncherDecision::Continue);
+        let banner = l.status.as_deref().unwrap_or("");
+        assert!(banner.starts_with("broski "), "banner = {banner}");
+    }
+
+    #[test]
+    fn slash_tab_completes_to_canonical_form() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/th".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        l.apply(LauncherAction::Complete);
+        assert_eq!(l.input, "/theme ");
+        // Cache prune completes with prune already filled.
+        let mut l2 = LauncherState::new(s(&["fmt"]));
+        for c in "/cac".chars() {
+            l2.apply(LauncherAction::InsertChar(c));
+        }
+        l2.apply(LauncherAction::Complete);
+        assert_eq!(l2.input, "/cache prune ");
+    }
+
+    #[test]
+    fn slash_arrow_navigates_command_list() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        l.apply(LauncherAction::InsertChar('/'));
+        let total = l.filtered_slash_commands().len();
+        assert!(total > 1);
+        l.apply(LauncherAction::Down);
+        assert_eq!(l.selected, Some(1));
+        l.apply(LauncherAction::Down);
+        assert_eq!(l.selected, Some(2));
+        l.apply(LauncherAction::Up);
+        assert_eq!(l.selected, Some(1));
+    }
+
+    #[test]
+    fn session_stats_increment_on_record_run() {
+        let mut l = LauncherState::new(s(&["a"]));
+        l.record_run("a".into(), RunOutcome::Success, Duration::from_millis(50));
+        l.record_run("a".into(), RunOutcome::Success, Duration::from_millis(150));
+        l.record_run("a".into(), RunOutcome::Failed, Duration::from_millis(75));
+        l.record_run("a".into(), RunOutcome::Cancelled, Duration::from_millis(25));
+        assert_eq!(l.stats.total_runs, 4);
+        assert_eq!(l.stats.successes, 2);
+        assert_eq!(l.stats.failures, 1);
+        assert_eq!(l.stats.cancellations, 1);
+        assert_eq!(l.stats.total_duration, Duration::from_millis(50 + 150 + 75 + 25));
+    }
+
+    #[test]
+    fn parse_slash_command_handles_aliases() {
+        assert_eq!(parse_slash_command("/h"), Ok(SlashCommand::Help));
+        assert_eq!(parse_slash_command("/?"), Ok(SlashCommand::Help));
+        assert_eq!(parse_slash_command("/exit"), Ok(SlashCommand::Quit));
+        assert_eq!(parse_slash_command("/version"), Ok(SlashCommand::About));
+        assert_eq!(parse_slash_command("/reload"), Ok(SlashCommand::Refresh));
+    }
+
+    #[test]
+    fn parse_slash_command_rejects_non_slash_input() {
+        let err = parse_slash_command("foo").expect_err("non-slash should fail");
+        assert!(err.contains("starting with '/'"));
     }
 }
