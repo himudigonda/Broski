@@ -406,9 +406,8 @@ fn run_target_with_dashboard(
         });
 
         let decision = drive_loop(terminal, event_rx, palette, etas, &cancellation);
-        let iter_summary = executor_handle
-            .join()
-            .map_err(|_| anyhow::anyhow!("executor thread panicked"))??;
+        let iter_summary =
+            executor_handle.join().map_err(|_| anyhow::anyhow!("executor thread panicked"))??;
 
         match decision? {
             LoopDecision::Quit => break iter_summary,

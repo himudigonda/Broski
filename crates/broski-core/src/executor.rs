@@ -1543,7 +1543,19 @@ fn prepare_task_invocation(
     }
 
     let (program, mut args) = resolve_shell_command(task.shell_override.as_ref())?;
-    args.push(shell_command.clone());
+    // The default shell is invoked as `sh -lc <script>` with no `set -e`, so a
+    // failing command mid-script would otherwise be silently swallowed by
+    // whatever runs after it (e.g. the common `mkdir ...; <command>; printf ok
+    // > stamp` pattern always "succeeds" because the final printf does). Only
+    // do this for the default shell: an explicit `@shell` override (including
+    // non-POSIX shells) takes full responsibility for its own failure
+    // semantics.
+    let executed_command = if task.shell_override.is_none() {
+        format!("set -e\n{shell_command}")
+    } else {
+        shell_command.clone()
+    };
+    args.push(executed_command);
     Ok(TaskInvocation { display_command: shell_command, program, args, _temp_script: None })
 }
 
@@ -1805,9 +1817,15 @@ fn normalize_paths(raw_paths: &[String]) -> Result<Vec<PathBuf>> {
 }
 
 fn copy_input_snapshot(source_root: &Path, stage_root: &Path, inputs: &[PathBuf]) -> Result<()> {
-    let mut copied = BTreeSet::new();
+    // `inputs` may contain both a directory and files nested inside it (e.g. a
+    // `**/*` glob matches `docs/architecture` as well as
+    // `docs/architecture/cache-explain.mdx`). Dedup at the resolved-file
+    // granularity, not just the top-level `inputs` entries, so a file reached
+    // both directly and via an ancestor directory's walk is only copied once.
+    let mut copied_files = BTreeSet::new();
+    let mut visited_entries = BTreeSet::new();
     for rel in inputs {
-        if !copied.insert(rel.clone()) {
+        if !visited_entries.insert(rel.clone()) {
             continue;
         }
         let source = source_root.join(rel);
@@ -1815,7 +1833,9 @@ fn copy_input_snapshot(source_root: &Path, stage_root: &Path, inputs: &[PathBuf]
             continue;
         }
         if source.is_file() || source.is_symlink() {
-            copy_snapshot_file_or_link(source_root, stage_root, &source)?;
+            if copied_files.insert(rel.clone()) {
+                copy_snapshot_file_or_link(source_root, stage_root, &source)?;
+            }
             continue;
         }
         if source.is_dir() {
@@ -1828,7 +1848,15 @@ fn copy_input_snapshot(source_root: &Path, stage_root: &Path, inputs: &[PathBuf]
                 if path.is_dir() {
                     continue;
                 }
-                copy_snapshot_file_or_link(source_root, stage_root, path)?;
+                let file_rel = path
+                    .strip_prefix(source_root)
+                    .with_context(|| {
+                        format!("stripping workspace prefix '{}'", source_root.display())
+                    })?
+                    .to_path_buf();
+                if copied_files.insert(file_rel) {
+                    copy_snapshot_file_or_link(source_root, stage_root, path)?;
+                }
             }
         }
     }
@@ -2289,6 +2317,43 @@ mod tests {
     }
 
     #[test]
+    fn multiline_task_fails_fast_on_intermediate_command_failure() {
+        // Common task bodies look like:
+        //   mkdir -p .broski/stamps
+        //   <the command that actually matters, e.g. cargo fmt --check>
+        //   printf 'ok\n' > .broski/stamps/foo.ok
+        // Without `set -e`, a failure in the middle line is swallowed because
+        // the trailing `printf` still succeeds, so the task is wrongly
+        // reported as a cache-worthy success.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::write(workspace.join("src/input.txt"), b"hello").expect("write input");
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert(
+            "build".to_string(),
+            simple_task("false\nmkdir -p dist\necho recovered > dist/output.txt"),
+        );
+
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.2".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("create cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("create executor");
+
+        let result = executor.run_target("build", &RunOptions::default());
+        assert!(
+            result.is_err(),
+            "a failing command earlier in a multi-line task body must fail the task even though a later line succeeds"
+        );
+    }
+
+    #[test]
     fn stage_snapshot_preserves_large_file_content() {
         let tmp = tempfile::tempdir().expect("temp dir");
         let workspace = tmp.path().join("workspace");
@@ -2335,6 +2400,30 @@ mod tests {
 
         assert!(stage.path().join("src/input.txt").exists());
         assert!(!stage.path().join("tmp/other.txt").exists());
+    }
+
+    #[test]
+    fn stage_snapshot_dedupes_file_reached_via_directory_and_directly() {
+        // Mirrors what `resolve_inputs` produces for a `**/*` glob: both an
+        // ancestor directory and a file nested inside it land in `inputs`.
+        // The directory walk and the direct file entry must not both try to
+        // copy the same file, or the second reflink copy errors out because
+        // the destination already exists.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("docs/architecture")).expect("create nested dirs");
+        fs::write(workspace.join("docs/architecture/cache-explain.mdx"), "explain")
+            .expect("write nested file");
+
+        let stage = tempfile::tempdir_in(tmp.path()).expect("create stage dir");
+        let inputs = vec![
+            PathBuf::from("docs/architecture"),
+            PathBuf::from("docs/architecture/cache-explain.mdx"),
+        ];
+        copy_input_snapshot(&workspace, stage.path(), &inputs)
+            .expect("copy input snapshot without colliding on duplicate destination");
+
+        assert!(stage.path().join("docs/architecture/cache-explain.mdx").exists());
     }
 
     fn file_hash(path: &Path) -> Result<String> {
@@ -3093,9 +3182,7 @@ mod tests {
                 deps: vec!["build".to_string()],
                 inputs: vec!["dist/build.txt".to_string()],
                 outputs: vec!["dist/check.txt".to_string()],
-                run: RunSpec::Shell(
-                    "mkdir -p dist && echo checked > dist/check.txt".to_string(),
-                ),
+                run: RunSpec::Shell("mkdir -p dist && echo checked > dist/check.txt".to_string()),
                 ..simple_task("mkdir -p dist && echo checked > dist/check.txt")
             },
         );
@@ -3150,10 +3237,8 @@ mod tests {
         fs::write(workspace.join("src/input.txt"), b"data").expect("write input");
 
         let mut tasks = BTreeMap::new();
-        tasks.insert(
-            "build".to_string(),
-            simple_task("mkdir -p dist && echo hi > dist/output.txt"),
-        );
+        tasks
+            .insert("build".to_string(), simple_task("mkdir -p dist && echo hi > dist/output.txt"));
 
         let config = BroskiFile {
             broski: BroskiSection { version: "0.7".to_string() },
