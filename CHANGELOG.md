@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.1] - 2026-06-30
+
+### Fixed — Multi-Line Task Bodies Did Not Fail Fast
+- Task scripts run via the default shell (`sh -lc <script>`) now have `set -e` injected ahead of the body. Previously a failing command in the middle of a multi-line task (e.g. `cargo fmt --all --check` failing inside a `mkdir ...; <command>; printf ok > stamp` body) was silently swallowed: execution continued to the final line, which usually succeeds, so the task was wrongly cached and reported as a pass. Tasks with an explicit `@shell` override are untouched — they keep full responsibility for their own failure semantics.
+- Added regression test `multiline_task_fails_fast_on_intermediate_command_failure`.
+
+### Fixed — Staging Crash on `@in` Globs That Match a Directory and Its Contents
+- `@in` patterns ending in `**/*` resolve to both a directory entry and the files nested inside it (e.g. `docs/architecture` and `docs/architecture/cache-explain.mdx`). Stage snapshotting copied the same file twice — once directly, once via the parent directory's recursive walk — and the second reflink copy crashed with `File exists`. `copy_input_snapshot` now dedupes at the resolved-file granularity instead of the top-level `@in` entry granularity.
+- Added regression test `stage_snapshot_dedupes_file_reached_via_directory_and_directly`.
+
+### Changed — Dogfood `broskifile` Hardening
+- `test` / `cov` now declare `crates/**/tests/fixtures/**/*` in `@in`; a fixture-dependent integration test (`test_acid_rollback_on_failure`) was failing inside the staged sandbox because its fixture directory was never copied in, masked until the `set -e` fix above made the failure visible.
+- `cov` now falls back to a Homebrew-provided `llvm-cov`/`llvm-profdata` when `rustup`'s `llvm-tools` component isn't on `PATH`, for non-rustup local Rust installs.
+- `examples_smoke`'s `@in` broadened from an explicit `src/`/`Cargo.toml`/`go.mod`/`package.json` enumeration to `examples/**/*`, fixing a real failure where `examples/polyglot`'s `data/input.txt` fixture was never staged.
+- Added a `docs` task wiring up `cd website && npm ci && npm run lint:all`, matching the README's documented (but previously unexercised) docs workflow.
+
 ## [0.7.0] - 2026-05-09
 
 ### Added — Selective DAG Force-Rerun (`x` / `X`)

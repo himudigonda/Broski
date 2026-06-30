@@ -23,7 +23,7 @@ slug: /
 
 ## Current Versioning
 
-- **Current:** `v0.7.0`
+- **Current:** `v0.7.1`
 
 ## Learn More (after quickstart)
 
