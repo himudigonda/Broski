@@ -17,7 +17,7 @@ lint: fmt
     printf 'ok\n' > .broski/stamps/lint.ok
 
 test: lint
-    @in Cargo.toml Cargo.lock crates/**/Cargo.toml crates/**/*.rs crates/**/tests/**/*.rs
+    @in Cargo.toml Cargo.lock crates/**/Cargo.toml crates/**/*.rs crates/**/tests/**/*.rs crates/**/tests/fixtures/**/*
     @out .broski/stamps/test.ok
     @isolation off
     mkdir -p .broski/stamps
@@ -29,12 +29,16 @@ test: lint
     printf 'ok\n' > .broski/stamps/test.ok
 
 cov: test
-    @in Cargo.toml Cargo.lock crates/**/Cargo.toml crates/**/*.rs
+    @in Cargo.toml Cargo.lock crates/**/Cargo.toml crates/**/*.rs crates/**/tests/fixtures/**/*
     @out .broski/stamps/cov.ok
     @isolation off
     mkdir -p .broski/stamps
     if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
       cargo install --locked cargo-llvm-cov
+    fi
+    if ! command -v llvm-profdata >/dev/null 2>&1 && command -v brew >/dev/null 2>&1; then
+      export LLVM_COV="$(brew --prefix llvm)/bin/llvm-cov"
+      export LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata"
     fi
     cargo llvm-cov --workspace --all-features --summary-only --fail-under-lines ${BROSKI_COVERAGE_MIN:-50}
     printf 'ok\n' > .broski/stamps/cov.ok
@@ -47,7 +51,7 @@ ci: cov
     printf 'ok\n' > .broski/stamps/ci.ok
 
 examples_smoke:
-    @in broskifile examples/**/broskifile examples/**/src/**/* examples/**/Cargo.toml examples/**/go.mod examples/**/package.json
+    @in broskifile examples/**/*
     @out .broski/stamps/examples_smoke.ok
     @isolation off
     mkdir -p .broski/stamps
@@ -57,3 +61,14 @@ examples_smoke:
     cargo run -p broski-cli -- --workspace examples/go-http run ci
     cargo run -p broski-cli -- --workspace examples/node-web run ci
     printf 'ok\n' > .broski/stamps/examples_smoke.ok
+
+docs:
+    @in website/package.json website/package-lock.json website/docusaurus.config.ts website/sidebars.ts website/tsconfig.json website/.markdownlint-cli2.jsonc website/docs/**/* website/versioned_docs/**/* website/src/**/* website/static/**/*
+    @out .broski/stamps/docs.ok
+    @dir website
+    @requires npm
+    @isolation off
+    npm ci
+    npm run lint:all
+    mkdir -p ../.broski/stamps
+    printf 'ok\n' > ../.broski/stamps/docs.ok
