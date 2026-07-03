@@ -1,0 +1,62 @@
+---
+sidebar_position: 5
+---
+
+# Examples
+
+The repository ships runnable `broskifile` examples under `examples/`, in increasing order of complexity. Clone
+the repo and run any of them directly — they're real, working broskifiles, not snippets.
+
+## Start here
+
+| Example | What it shows |
+| --- | --- |
+| `examples/minimal` | The smallest possible graph-mode task: `@in` + `@out`, nothing else. |
+| `examples/basic` | A simple multi-step file pipeline (several tasks with dependencies). |
+| `examples/python-cli` | A normal test/build workflow with real cache reuse across runs. |
+
+## Broader stack coverage
+
+| Example | What it shows |
+| --- | --- |
+| `examples/go-http` | Building and testing a Go service. |
+| `examples/node-web` | Building and testing a Node service. |
+| `examples/polyglot` | A single pipeline spanning multiple languages/toolchains. |
+| `examples/showcase` | A heavier React + Rust + Docker demonstration — not the first onboarding stop, but useful once you've seen the basics. |
+
+## Running an example
+
+Run every example's smoke task from the repository root in one shot:
+
+```bash
+broski --workspace . run examples_smoke --explain
+```
+
+Or point Broski directly at a single example's workspace:
+
+```bash
+cargo run -p broski-cli -- --workspace examples/python-cli run ci --explain
+```
+
+Once you have a release build installed, drop the `cargo run -p broski-cli --` prefix:
+
+```bash
+broski --workspace examples/go-http run ci --explain
+```
+
+## Suggested reading order
+
+1. Skim `examples/minimal/broskifile` next to [Your First Broskifile](./first-broskifile) — it's the same
+   shape, distilled to the minimum.
+2. Read `examples/basic/broskifile` alongside [Annotations](../dsl/annotations) to see `@in`/`@out`/deps used
+   together in a real multi-task pipeline.
+3. Read `examples/python-cli/broskifile` to see cache reuse in practice — run it twice with `--explain` and
+   watch the second run hit cache.
+4. Once comfortable, `examples/polyglot` and `examples/showcase` demonstrate larger, more realistic graphs.
+
+## Related pages
+
+- [30-Second Quickstart](./thirty-second-quickstart)
+- [Your First Broskifile](./first-broskifile)
+- [Task Headers and Parameters](../dsl/tasks-and-params)
+- [CLI Commands and Flags](../cli/commands)

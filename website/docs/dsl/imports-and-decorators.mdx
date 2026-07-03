@@ -14,8 +14,13 @@ sidebar_position: 5
 Guardrails:
 
 - circular imports are rejected with a readable chain
-- collisions across task/alias/variable names fail hard
-- depth limit prevents runaway recursion
+- collisions across task/alias/variable names fail hard across the merged document
+- depth limit prevents runaway recursion (max depth: 10)
+- an imported file's own `version = "..."` line is stripped during expansion — only the root broskifile's
+  `version` line matters, so imported files don't need to (and shouldn't) redeclare it
+- `@import` must appear at the top level, outside any indented task body
+- imports are resolved relative to the **workspace root**, not the importing file's directory; `@import` fails
+  outside a workspace context
 
 ## Decorators
 

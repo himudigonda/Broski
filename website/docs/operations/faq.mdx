@@ -58,3 +58,30 @@ Render `graph.dot` with Graphviz to inspect graph shape in PR reviews.
 ## Where should we start in a large monorepo?
 
 Start with one high-value pipeline (build/test/package), land deterministic contracts, and expand gradually rather than porting all scripts at once.
+
+## How do I avoid hashing `node_modules`/`.venv` on every run?
+
+Use `@stage_ro` instead of `@in` for large, already-reproducible directories your task needs to see but that
+shouldn't drive cache invalidation:
+
+```bash
+build:
+    @in src/**/* package.json
+    @stage_ro node_modules
+    @out dist/app
+    npm run build
+```
+
+See [Annotations → `@stage_ro`](../dsl/annotations).
+
+## Is there a live dashboard, or just the spinner?
+
+Yes — `broski tui <task>` (or `broski run <task> --tui`) opens a `ratatui`-based dashboard with a DAG view, live
+logs, and ETA estimates. `broski tui` with no task opens an interactive launcher for picking targets. See
+[TUI Dashboard](../cli/tui).
+
+## How do I check whether the cache is actually being hit over time?
+
+`broski history` lists the most recent successful run per task; `broski history <task> --limit N` shows the last
+`N` runs for one task with duration and a short fingerprint — useful for spotting "this task reruns every time
+even though nothing should have changed."

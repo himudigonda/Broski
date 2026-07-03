@@ -4,13 +4,83 @@ sidebar_position: 4
 
 # Interpolation and Built-ins
 
-Interpolation syntax:
+## Syntax
 
 ```bash
 {{ VAR }}
 {{ os() }}
 {{ arch() }}
+{{ env("KEY") }}
 {{ env("KEY", "default") }}
 ```
 
-Dynamic variables are supported via command substitution in DSL declarations. Avoid nondeterministic values (`date`, random) in graph tasks if cache stability matters.
+`{{ expr }}` is parsed everywhere a task body, `@in`/`@out`/`@dir`/`@env` value, or top-level variable value
+can appear. Whitespace around `expr` is trimmed. An unterminated `{{` (missing `}}`) or an empty `{{ }}` is a
+parse error.
+
+## Resolution order
+
+A bare `{{ NAME }}` is resolved in two tiers, checked in this order:
+
+1. **Top-level variables** — any `KEY = "value"` or `KEY = $(command)` declaration from before the first task
+   header (see [Annotations](./annotations)).
+2. **Task parameters** — the current task's own `[param]` / `[param="default"]` header bindings.
+
+Top-level variables are resolved immediately at parse time. Task parameters are different: because their actual
+value depends on the CLI arguments a caller passes at run time, the parser leaves `{{ param }}` as literal text
+inside the task body and only substitutes it after parameter binding, at execution time. In practice this is
+transparent — `{{ target }}` in a task body just works — but it explains why a param reference can't be used in
+a *top-level* variable declaration (top-level variables resolve before any task, and hence before any params
+exist).
+
+Anything that is neither a known top-level variable nor a declared parameter of the current task fails to parse:
+`unknown variable '<name>'`. A `{{ expr }}` that isn't a valid identifier and isn't a recognized builtin call
+(e.g. `{{ 1abc }}`, `{{ foo-bar }}`) fails with `invalid variable name '<name>'` — identifiers must start with a
+letter or `_`, then continue with letters, digits, or `_`.
+
+## Built-in functions
+
+| Expression | Returns | Notes |
+| --- | --- | --- |
+| `{{ os() }}` | `std::env::consts::OS` | e.g. `"linux"`, `"macos"`, `"windows"`. |
+| `{{ arch() }}` | `std::env::consts::ARCH` | e.g. `"x86_64"`, `"aarch64"`. |
+| `{{ env("KEY") }}` | Host env value, or `""` | **One-argument form**: if `KEY` is unset in the host process environment, this resolves to an **empty string** — it does not error and does not fall back to anything else. |
+| `{{ env("KEY", "default") }}` | Host env value, or `"default"` | Two-argument form: explicit fallback when `KEY` is unset. |
+
+```bash title="broskifile"
+build:
+    @env RUSTFLAGS="-C target-cpu={{ arch() }}"
+    @out dist/{{ os() }}/app
+    cargo build --release
+    echo "built for {{ env("TARGET_LABEL", "local") }}"
+```
+
+`env()` only ever takes one or two string-literal arguments (quotes required); anything else is a parse error.
+
+## Top-level variables (declarations, not builtins)
+
+Static and dynamic top-level variables are declared before any task header — full syntax, timeout, output cap,
+and laziness rules are documented in [Annotations](./annotations).
+Once declared, they're referenced the same way as any other `{{ NAME }}`:
+
+```bash title="broskifile"
+version = "0.5"
+GIT_SHA = $(git rev-parse --short HEAD)
+
+release:
+    @out dist/release-{{ GIT_SHA }}.tar.gz
+    tar czf dist/release-{{ GIT_SHA }}.tar.gz dist/
+```
+
+## Determinism
+
+Avoid nondeterministic values (`date`, random IDs, timestamps) in graph-mode tasks — since both top-level
+variables and task parameters flow into the fingerprint, a value that changes on every invocation will bust the
+cache on every run. Prefer stable identifiers: a git SHA, a resolved version string, a content hash you compute
+yourself.
+
+## Related pages
+
+- [Annotations](./annotations)
+- [Task Headers and Parameters](./tasks-and-params)
+- [DSL Reference Table](./reference-table)

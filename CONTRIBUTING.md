@@ -36,7 +36,7 @@ cargo test --workspace
 ## Release references
 - Docs Portal: <https://himudigonda.me/broski_docs/>
 - Docs source: `website/`
-- Legacy markdown archive: `docs/legacy/`
+- Security/architecture reports: `docs/reports/`
 
 ## Design expectations
 - Determinism over convenience.

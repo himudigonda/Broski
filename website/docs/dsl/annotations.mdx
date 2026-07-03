@@ -33,6 +33,42 @@ Use narrow patterns. Prefer `src/**/* Cargo.toml` over `**/*`.
 
 If a task should be cached, declare explicit outputs.
 
+:::caution Non-matching globs are not an error
+If an `@in` pattern contains `**` and matches nothing, Broski does **not** fail validation. It falls back to
+treating the literal pattern string as a (likely-missing) input path, which then shows up in `--explain` output
+as a plain, unresolved manifest entry. A silently-empty glob is a common source of "why didn't this rebuild"
+confusion — if a task never reruns when you expect it to, double check the glob actually matches files on disk.
+:::
+
+## `@stage_ro` read-only staged paths
+
+```bash title="broskifile"
+@stage_ro node_modules
+@stage_ro .venv
+```
+
+- Type: list of workspace-relative paths.
+- Purpose: makes a path visible inside the task's sandbox/stage **without** treating it as a fingerprinted input.
+- Effect: paths are symlinked (or copied, as a fallback) into the stage read-only. Use this for large,
+  slow-to-hash, or already-reproducible directories — dependency caches, virtualenvs, vendored toolchains —
+  that a task needs to see but that shouldn't drive cache invalidation the way `@in` does.
+- Constraints:
+  - Every declared path **must already exist** on disk; validation fails otherwise.
+  - A `@stage_ro` path cannot overlap a declared `@out` path — Broski rejects the broskifile with
+    `@stage_ro path '<path>' overlaps output '<output>'`.
+  - Not allowed on `@mode interactive` tasks (interactive tasks run directly in the workspace, so there is no
+    stage to link into).
+
+```bash title="broskifile"
+build:
+    @in src/**/* Cargo.toml
+    @stage_ro node_modules
+    @out dist/app
+    npm run build
+```
+
+Prefer `@stage_ro` over `@in` for anything you don't want to pay a content-hash for on every run.
+
 ## `@env` runtime environment
 
 ```bash title="broskifile"
@@ -54,9 +90,17 @@ Forms:
 @secret_env AWS_SECRET_ACCESS_KEY
 ```
 
-- Purpose: mark env keys as sensitive.
-- Effect: values are redacted in terminal/log/explain paths.
-- Explain reason stays generic: `cache miss: secret env changed`.
+- Purpose: mark env keys as sensitive **and** inherit them from the runtime environment — `@secret_env KEY` is
+  self-sufficient, you do not also need `@env KEY`. Values resolve from `.env` (`@load`) first, then the host
+  environment, and the task fails fast if the key is missing everywhere.
+- Effect: matched values are redacted from captured stdout/stderr via an Aho-Corasick scan and replaced with
+  `[REDACTED]`. **Only values 6 characters or longer are redacted** — shorter secrets (rare, but e.g. a 4-digit
+  PIN) are not pattern-matched and can leak into logs. Treat this as a floor, not a guarantee.
+- Fingerprinting: secret values never appear in the manifest in plaintext. Their contribution to the fingerprint
+  is a **keyed BLAKE3 digest**, keyed by a workspace-local salt generated once and persisted at
+  `.broski/config/salt` (file mode `0600`). This means the fingerprint still changes when a secret changes, but
+  the manifest itself never reveals the value — even to someone with `.broski/cache` access.
+- Explain reason stays generic: `cache miss: secret env changed` (no key name, no value).
 
 Do not put literal secrets in `broskifile`.
 
@@ -97,11 +141,24 @@ Inference when omitted:
 @isolation off
 ```
 
-- `strict`: enforce strict isolation where available.
-- `best_effort`: attempt strict, degrade when unsupported.
-- `off`: no sandbox isolation.
+- `strict`: run inside a `bwrap` sandbox — network unshared, filesystem restricted to a minimal ro-bind set
+  (`/usr /bin /lib`, an empty writable `/etc` plus a ro-bound `/etc/resolv.conf`, `$HOME` tmpfs-masked) plus a
+  read-write bind of the task's own stage directory. **Linux-only** (needs `bwrap` on `PATH`); on any other
+  platform this errors out rather than silently degrading.
+- `best_effort`: run the command directly, no sandbox — but still clear the process environment down to a
+  minimal safe set before layering task `@env`/`@secret_env` on top.
+- `off`: run the command directly with the **full parent environment inherited unchanged** — no env clearing.
 
-`--force-isolation` CLI flag overrides task setting for graph tasks.
+When `@isolation` is omitted, the default is platform-dependent: **Linux defaults to `strict`**, every other OS
+defaults to `best_effort`.
+
+`strict` and `best_effort` share the same environment policy: both strip the process environment down to just
+`PATH, HOME, USER, TMPDIR, SHELL, TERM` before adding the task's declared `@env`/`@secret_env` values. `off` is
+the only mode that leaks the full ambient environment into the task.
+
+`--force-isolation` CLI flag forces `strict` for every graph task in the run, regardless of each task's own
+`@isolation` setting. It requires Linux + `bwrap` on `PATH` (the run aborts up front otherwise), and it is
+**rejected outright for interactive tasks** — `--force-isolation is not supported for interactive task '<name>'`.
 
 ## `@requires` tool preflight checks
 
@@ -110,7 +167,10 @@ Inference when omitted:
 ```
 
 - Purpose: fail fast when required binaries are missing.
-- Check timing: before execution work.
+- Check timing: **one upfront pass over the whole resolved graph**, before any task in the run starts — not a
+  per-task check at that task's own start time. Every unique tool name across every task in the target's
+  dependency closure is resolved via `PATH` lookup before execution begins; a single missing tool aborts the
+  entire run before anything executes.
 - Error style: task-scoped, explicit missing binary.
 
 Use this on setup/dev/deploy tasks to reduce trial-and-error failures.
@@ -148,6 +208,47 @@ In non-interactive contexts, this should fail safe.
 - Path: workspace-relative.
 - Typical usage: local development defaults.
 
+## Top-level variables
+
+Before any task header, you can declare workspace-level variables that are available to every task via
+`{{ NAME }}` interpolation:
+
+```bash title="broskifile"
+version = "0.5"
+REGISTRY = "ghcr.io/acme"
+GIT_SHA = $(git rev-parse --short HEAD)
+
+build:
+    @out dist/{{ GIT_SHA }}.tar
+    docker tag app {{ REGISTRY }}/app:{{ GIT_SHA }}
+```
+
+- `KEY = "value"` — a static string. Supports `{{ OTHER_VAR }}` interpolation of previously-declared variables
+  (cyclic references are rejected at parse time).
+- `KEY = $(command)` — a **dynamic** variable evaluated by running `command` through `/bin/sh -lc`. The command's
+  environment is stripped to `PATH, HOME, USER, SHELL, TMPDIR, TERM` only, it has a **5-second timeout**, and its
+  combined stdout/stderr is capped at **1 MiB**. A non-zero exit surfaces the command's stderr in the parse
+  error.
+- Dynamic variables are evaluated **lazily** — only if the task actually being run references them (an unused
+  `$(...)` variable never executes).
+- All top-level variable declarations must appear **before the first task header** in the file.
+- Both static and dynamic variables participate in the task's fingerprint (as `var:<name>` manifest entries), so
+  changing a variable's value can trigger a cache miss for any task that references it.
+
+:::caution Nondeterminism
+`$(date)`, `$(uuidgen)`, or anything else that changes on every invocation will bust the cache on every run of
+any task that references it. Reserve dynamic variables for values that are stable across a given commit/build
+(git SHA, package version, resolved tool path), not wall-clock time.
+:::
+
+## `@shell` is not a DSL directive
+
+`TaskSpec` has a `shell_override` field internally, but the DSL parser never populates it — there is no `@shell`
+annotation. Every task written in the `.broskifile` DSL runs its body via the default shell (`sh -lc <script>`
+on Unix). The only way to override the shell program is the legacy TOML broskifile format, which is otherwise
+deprecated in favor of the DSL. If you're writing DSL broskifiles (the documented, current path), assume the
+shell is fixed and don't look for a per-task override.
+
 ## Full example
 
 ```bash title="broskifile"
@@ -180,6 +281,11 @@ clean-db:
 3. Expecting `@secret_env` values in explain output.
 4. Using `@dir` with multiple values.
 5. Forgetting `@requires` for tool-heavy tasks.
+6. Declaring `@stage_ro` for a path that doesn't exist yet, or that overlaps a declared `@out` — both fail
+   validation.
+7. Assuming a non-matching `@in` glob is an error — it silently becomes a literal (likely-missing) input path
+   instead.
+8. Assuming `@secret_env KEY` still needs a companion `@env KEY` to be inherited — it doesn't; it's redundant.
 
 ## Related pages
 
