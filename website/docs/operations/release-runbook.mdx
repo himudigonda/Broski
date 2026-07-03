@@ -4,11 +4,47 @@ sidebar_position: 3
 
 # Release Runbook
 
-1. Ensure local gates are green.
-2. Merge to `main`.
-3. Tag release (`vX.Y.Z`).
-4. Verify release workflow and artifacts.
-5. Validate install script and `broski --version`.
-6. Publish notes and update portal links.
+## Branch policy
 
-See repository runbook for exact command sequence and rollback actions.
+- Feature work lands on feature branches, merged into `develop` after CI is green.
+- `develop` merges to `main` only when release-ready — `main` should always be releasable.
+- Release tags are cut from a green `main` only, never from `develop` or a feature branch.
+
+## Quality gate (required before every PR)
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+./target/release/broski --workspace . run ci
+cd website && npm ci && npm run lint:all
+```
+
+The last two lines dogfood Broski on itself and validate the docs portal (markdown lint + a full Docusaurus
+production build) — both are required, not optional, before a release.
+
+## Cutting a release
+
+1. Ensure `main` is green: full quality gate above, plus CI on GitHub Actions.
+2. Tag the release (`vX.Y.Z`) from `main`.
+3. The tag push triggers `.github/workflows/release.yml`, which builds and publishes release artifacts.
+4. Verify the release workflow run completed and artifacts are attached.
+5. Validate the install script end to end and confirm `broski --version` reports the new tag.
+6. Publish release notes (this docs portal's `releases/` section) and update any version references —
+   `docs/index.md`'s "Current Versioning" line, the relevant `releases/vX.Y.md` page, and the sidebar entry in
+   `website/sidebars.ts` if a new minor line was cut.
+7. If a rollback is needed: revert the tag's release artifacts and re-point the install script's `stable`
+   channel at the last known-good tag; do not force-push over a published tag.
+
+## Isolation guidance for release validation
+
+- Generic/CI tests should use host-agnostic isolation (`best_effort` or `off`) unless strict isolation is the
+  feature under test.
+- Linux strict isolation (`bwrap`) is validated in dedicated tests/jobs — don't assume it runs on every
+  contributor's machine or in every CI job.
+
+## Related pages
+
+- [CLI Commands and Flags](../cli/commands)
+- [Release Notes](../releases)
+- [Security](./security)

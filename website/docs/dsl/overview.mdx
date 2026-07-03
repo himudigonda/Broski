@@ -24,6 +24,23 @@ build [target] [mode="release"]: deps...
     run command
 ```
 
+## Top-level variables
+
+Before the first task header, you can declare workspace-level variables (static strings or `$(command)`
+output) that any task can reference via `{{ NAME }}`:
+
+```bash title="broskifile"
+version = "0.5"
+GIT_SHA = $(git rev-parse --short HEAD)
+
+release:
+    @out dist/release-{{ GIT_SHA }}.tar.gz
+    tar czf dist/release-{{ GIT_SHA }}.tar.gz dist/
+```
+
+See [Annotations](./annotations) for the full syntax, evaluation
+timeout, and caching implications.
+
 ## Execution inference rules
 
 - task with declared `@out` defaults to graph behavior

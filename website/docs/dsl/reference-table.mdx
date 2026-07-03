@@ -10,10 +10,12 @@ This page is factual reference only: types, defaults, and constraints.
 
 | Key | Type | Default | Constraints |
 | --- | --- | --- | --- |
-| `version` | string | none | Required. Use `"0.5"` for current DSL. |
-| `alias <name> = <target>` | declaration | none | Target must exist. Cycles are invalid. |
+| `version` | string | none | Required. Minor version must be between `0.3` and the running binary's own minor version (currently `0.7` for `v0.7.1`) — declaring a newer minor than your installed binary fails with an upgrade message. Existing broskifiles that say `"0.5"` remain valid; you don't need to bump this just to use newer CLI/TUI features. |
+| `alias <name> = <target>` | declaration | none | Target must exist (possibly transitively). Cycles are invalid. Cannot equal its own target, shadow a task name, or shadow a reserved CLI subcommand name. |
+| `KEY = "value"` | top-level variable | none | Must appear before the first task header. Supports `{{ OTHER_VAR }}` interpolation; cycles rejected. |
+| `KEY = $(command)` | top-level variable | none | Dynamic; runs via `sh -lc`, 5s timeout, 1 MiB output cap, evaluated lazily only if referenced by the task being run. |
 | `@load <path>` | directive | none | Path is workspace-relative. File must exist. |
-| `@import <path>` | directive | none | Path is workspace-relative. Circular imports are rejected. |
+| `@import <path>` | directive | none | Path is workspace-relative. Circular imports are rejected. Depth limit 10. |
 
 ## Task header
 
@@ -28,26 +30,28 @@ This page is factual reference only: types, defaults, and constraints.
 
 | Annotation | Type | Default | Constraints |
 | --- | --- | --- | --- |
-| `@in <patterns...>` | list of strings | empty | Glob patterns. Drives graph fingerprinting. |
+| `@in <patterns...>` | list of strings | empty | Glob patterns. Drives graph fingerprinting. A `**` pattern that matches nothing degrades to a literal (likely-missing) path rather than erroring. |
+| `@stage_ro <paths...>` | list of strings | empty | Read-only staged paths (symlinked into the sandbox). Path must already exist; must not overlap `@out`. Disallowed on interactive tasks. |
 | `@out <paths...>` | list of strings | empty | Declares graph outputs. Enables graph mode by default. |
 | `@env KEY=value` | key-value | none | Injects explicit env value. |
-| `@env KEY` | key | inherit | Reads value from runtime env. |
-| `@secret_env KEY` | key | none | Value redacted in explain/log output. |
-| `@dir <path>` | string | workspace root | Workspace-relative. |
-| `@mode graph\|interactive` | enum | inferred | `@out` implies graph when mode omitted. |
-| `@isolation off\|best_effort\|strict` | enum | runner default | Strict support depends on host capabilities. |
-| `@requires <tools...>` | list of strings | empty | Tools must be resolvable in `PATH`. |
-| `@private` | flag | false | Hidden from default task listing. |
-| `@confirm "message"` | string | none | Requires user confirmation before execution. |
+| `@env KEY` | key | inherit | Reads value from runtime env (`.env` via `@load` first, then host). |
+| `@secret_env KEY` | key | none | Redacted in explain/log output (values ≥6 chars only); also implicitly inherited like bare `@env KEY`; fingerprinted via keyed BLAKE3. |
+| `@dir <path>` | string | workspace root | Workspace-relative. Exactly one value. |
+| `@mode graph\|interactive` | enum | inferred | `@out` implies graph when mode omitted; no `@out` implies interactive. |
+| `@isolation off\|best_effort\|strict` | enum | `strict` on Linux, `best_effort` elsewhere | `strict` is Linux-only (`bwrap`). `strict`/`best_effort` clear the env to `PATH,HOME,USER,TMPDIR,SHELL,TERM` before applying `@env`; `off` inherits the full parent env. |
+| `@requires <tools...>` | list of strings | empty | Tools must be resolvable in `PATH`. Checked once per unique tool, for the whole resolved graph, before any task starts. |
+| `@private` | flag | false | Hidden from default task listing and from the TUI launcher's task list. |
+| `@confirm "message"` | string | none | Requires user confirmation before execution; fails immediately if stdin isn't a TTY (never silently proceeds). |
 
 ## Built-in interpolation
 
 | Expression | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `{{ os() }}` | string | none | Host OS identifier. |
-| `{{ arch() }}` | string | none | Host architecture identifier. |
-| `{{ env("KEY", "fallback") }}` | string | fallback if missing | Reads runtime env with fallback. |
-| `{{ PARAM }}` | string | none | Resolves task parameter or variable. |
+| `{{ os() }}` | string | none | Host OS identifier (`std::env::consts::OS`). |
+| `{{ arch() }}` | string | none | Host architecture identifier (`std::env::consts::ARCH`). |
+| `{{ env("KEY") }}` | string | `""` if missing | One-arg form: missing var resolves to an empty string, not an error. |
+| `{{ env("KEY", "fallback") }}` | string | fallback if missing | Two-arg form: explicit fallback when var is unset. |
+| `{{ PARAM }}` | string | none | Resolves a top-level variable first, then a task parameter of the current task. |
 
 ## Mode behavior summary
 

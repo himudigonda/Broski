@@ -17,13 +17,42 @@ flowchart LR
   C --> R[Changed / Added / Removed reasons]
 ```
 
-Typical reasons include:
+Every reason is derived by diffing the current manifest against the previous execution record, key by key. The
+exact strings Broski prints (verbatim, not paraphrased) are:
 
-- `input changed`
-- `env changed`
-- `task parameter changed`
-- `command changed`
-- `interactive mode bypass`
+| Reason string | Trigger |
+| --- | --- |
+| `cache miss: no prior execution record` | Task has never run successfully before. |
+| `cache miss: input changed: <path>` / `added: <path>` / `removed: <path>` | An `@in`-resolved file's content hash differs from the last run. |
+| `cache miss: input pattern changed: <pattern>` / `added` / `removed` | The raw `@in` glob pattern list itself changed (not the matched files — the patterns). |
+| `cache miss: env changed: <key>` | A declared `@env` value changed. |
+| `cache miss: secret env changed` | A `@secret_env` value changed. No key name or value is ever printed — this reason is intentionally generic. |
+| `cache miss: output contract changed: <output>` / `added` / `removed` | The task's declared `@out` paths changed. |
+| `cache miss: task command changed` | The rendered shell command (after interpolation/param binding) changed. |
+| `cache miss: isolation mode changed` | `@isolation` (or the effective platform default) changed. |
+| `cache miss: task identity changed` | The task's own name-derived manifest key changed (rare — usually only via `--force`-adjacent internal state). |
+| `cache miss: var:<name> changed` | A top-level variable or task parameter that feeds the fingerprint changed. There is no separate "task parameter changed" string — parameters and variables share the same `var:` manifest namespace. |
+| `cache bypass: --force supplied` | `--force` flag on the CLI. |
+| `cache bypass: --no-cache supplied` | `--no-cache` flag on the CLI. |
+| `cache bypass: force-rerun requested` | The TUI's `x` (single task) or `X` (whole target) force-rerun key, or programmatic `RunOptions::force_tasks`. |
+| `cache bypass: interactive mode` | Interactive tasks (`@mode interactive`) never read or write the cache at all. |
+
+If none of the tracked manifest keys differ but the overall fingerprint still doesn't match, Broski falls back
+to the generic `cache miss: fingerprint changed` — this should be rare in practice and usually points at an
+untracked source of nondeterminism (e.g. a dynamic top-level variable whose command output isn't stable).
+
+## Per-phase timing (`--explain` and `BROSKI_PROFILE`)
+
+When `--explain` is set — or the `BROSKI_PROFILE` environment variable is set to a truthy value, independent of
+`--explain` — Broski also prints a per-phase timing breakdown for each task:
+
+```text
+timing: resolve_inputs=4ms fingerprint=12ms cache_restore=0ms stage_prep=8ms command_exec=1340ms output_promote=6ms cache_store=3ms
+```
+
+The phases match the boundaries emitted on the internal `ProgressEvent::TaskPhase` stream: `ResolveInputs`,
+`Fingerprint`, `CacheRestore`, `StagePrep`, `CommandExec`, `OutputPromote`, `CacheStore`. This is the fastest way
+to tell whether a slow task is slow because of the command itself or because of staging/fingerprinting overhead.
 
 ## Explain workflow for migration debugging
 
@@ -46,5 +75,7 @@ If you use `@secret_env`, explain output remains actionable without exposing sec
 
 Expected:
 
-- secret-derived changes are reported generically
-- secret values are redacted from output and logs
+- secret-derived changes are reported generically (`cache miss: secret env changed`, no key or value)
+- secret values ≥6 characters are redacted from captured stdout/stderr; shorter values are not pattern-matched
+- secret values are fingerprinted via a keyed BLAKE3 digest (salt at `.broski/config/salt`, mode `0600`), never
+  stored or diffed in plaintext
