@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use broski_store::{
@@ -10,6 +10,8 @@ use broski_store::{
 };
 use rusqlite::{params, Connection};
 use walkdir::WalkDir;
+
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct LocalArtifactStore {
@@ -39,6 +41,7 @@ impl LocalArtifactStore {
     fn init_db(&self) -> Result<()> {
         let conn = Connection::open(&self.db_path)
             .with_context(|| format!("opening sqlite db {}", self.db_path.display()))?;
+        conn.busy_timeout(BUSY_TIMEOUT).context("setting sqlite busy timeout")?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS executions (
@@ -63,8 +66,27 @@ impl LocalArtifactStore {
     }
 
     fn connection(&self) -> Result<Connection> {
-        Connection::open(&self.db_path)
-            .with_context(|| format!("opening sqlite db {}", self.db_path.display()))
+        let conn = Connection::open(&self.db_path)
+            .with_context(|| format!("opening sqlite db {}", self.db_path.display()))?;
+        conn.busy_timeout(BUSY_TIMEOUT).context("setting sqlite busy timeout")?;
+        Ok(conn)
+    }
+
+    fn referenced_object_hashes(&self) -> Result<HashSet<String>> {
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare("SELECT artifacts_json FROM executions")
+            .context("preparing referenced-objects query")?;
+        let mut rows = stmt.query([]).context("querying referenced objects")?;
+
+        let mut hashes = HashSet::new();
+        while let Some(row) = rows.next().context("reading referenced-objects row")? {
+            let artifacts_json: String = row.get(0).context("reading artifacts_json")?;
+            let artifacts: Vec<CachedArtifact> = serde_json::from_str(&artifacts_json)
+                .context("deserializing artifacts_json for prune")?;
+            hashes.extend(artifacts.into_iter().map(|artifact| artifact.object_hash));
+        }
+        Ok(hashes)
     }
 }
 
@@ -196,17 +218,17 @@ impl ArtifactStore for LocalArtifactStore {
                 true,
             ),
             None => (
-                // One row per task: the most recent execution per task_name.
-                "SELECT e.task_name, e.fingerprint, e.manifest_json, e.artifacts_json,
-                        e.stdout, e.stderr, e.created_at, e.duration_ms
-                 FROM executions e
-                 INNER JOIN (
-                     SELECT task_name, MAX(created_at) AS max_created
+                // Ties on created_at (1s resolution) are broken by rowid.
+                "SELECT task_name, fingerprint, manifest_json, artifacts_json,
+                        stdout, stderr, created_at, duration_ms
+                 FROM (
+                     SELECT *, ROW_NUMBER() OVER (
+                         PARTITION BY task_name ORDER BY created_at DESC, rowid DESC
+                     ) AS rn
                      FROM executions
-                     GROUP BY task_name
-                 ) latest
-                 ON latest.task_name = e.task_name AND latest.max_created = e.created_at
-                 ORDER BY e.created_at DESC
+                 )
+                 WHERE rn = 1
+                 ORDER BY created_at DESC
                  LIMIT ?1"
                     .to_string(),
                 false,
@@ -268,9 +290,21 @@ impl ArtifactStore for LocalArtifactStore {
             let (object_hash, kind) = hash_and_kind(&absolute)?;
             let object_dir = self.objects_dir.join(&object_hash);
             if !object_dir.exists() {
-                copy_tree(&absolute, &object_dir).with_context(|| {
-                    format!("copying artifact '{}' into CAS", absolute.display())
+                let staging = tempfile::Builder::new()
+                    .prefix(".staging-")
+                    .tempdir_in(&self.objects_dir)
+                    .context("creating staging dir for cache object")?;
+                let staged = staging.path().join("payload");
+                copy_tree(&absolute, &staged).with_context(|| {
+                    format!("copying artifact '{}' into CAS staging area", absolute.display())
                 })?;
+                if let Err(err) = fs::rename(&staged, &object_dir) {
+                    if !object_dir.exists() {
+                        return Err(err).with_context(|| {
+                            format!("promoting staged cache object '{}'", object_hash)
+                        });
+                    }
+                }
             }
 
             cached.push(CachedArtifact {
@@ -307,6 +341,17 @@ impl ArtifactStore for LocalArtifactStore {
                 ));
             }
 
+            let (actual_hash, _kind) = hash_and_kind(&src).with_context(|| {
+                format!("re-hashing cache object '{}' before restore", artifact.object_hash)
+            })?;
+            if actual_hash != artifact.object_hash {
+                return Err(anyhow!(
+                    "cache object '{}' is corrupted (recomputed hash is '{}'); refusing to restore",
+                    artifact.object_hash,
+                    actual_hash
+                ));
+            }
+
             remove_path_if_exists(&dest)?;
 
             if let Some(parent) = dest.parent() {
@@ -324,7 +369,8 @@ impl ArtifactStore for LocalArtifactStore {
 
     fn prune(&self, max_size_mb: u64) -> Result<PruneReport> {
         let max_bytes = max_size_mb.saturating_mul(1024 * 1024);
-        let mut object_dirs = Vec::new();
+        let referenced = self.referenced_object_hashes()?;
+        let mut objects = Vec::new();
 
         for entry in fs::read_dir(&self.objects_dir)
             .with_context(|| format!("reading objects dir '{}'", self.objects_dir.display()))?
@@ -332,28 +378,43 @@ impl ArtifactStore for LocalArtifactStore {
             let entry = entry.context("reading objects dir entry")?;
             let path = entry.path();
             let metadata = entry.metadata().context("reading object metadata")?;
-            if !metadata.is_dir() {
+            let size = if metadata.is_dir() {
+                dir_size(&path)?
+            } else if metadata.is_file() {
+                metadata.len()
+            } else {
                 continue;
-            }
+            };
 
+            let is_referenced = path
+                .file_name()
+                .map(|name| referenced.contains(name.to_string_lossy().as_ref()))
+                .unwrap_or(false);
             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let size = dir_size(&path)?;
-            object_dirs.push((path, modified, size));
+            objects.push((path, metadata.is_dir(), modified, size, is_referenced));
         }
 
-        object_dirs.sort_by_key(|(_, modified, _)| *modified);
+        objects.sort_by_key(|(_, _, modified, _, _)| *modified);
 
-        let mut total: u64 = object_dirs.iter().map(|(_, _, size)| *size).sum();
+        let mut total: u64 = objects.iter().map(|(_, _, _, size, _)| *size).sum();
         let mut removed_objects = 0usize;
         let mut removed_bytes = 0u64;
 
-        for (path, _, size) in object_dirs {
+        for (path, is_dir, _, size, is_referenced) in objects {
             if total <= max_bytes {
                 break;
             }
+            if is_referenced {
+                continue;
+            }
 
-            fs::remove_dir_all(&path)
-                .with_context(|| format!("removing cache object '{}'", path.display()))?;
+            if is_dir {
+                fs::remove_dir_all(&path)
+                    .with_context(|| format!("removing cache object '{}'", path.display()))?;
+            } else {
+                fs::remove_file(&path)
+                    .with_context(|| format!("removing cache object '{}'", path.display()))?;
+            }
             removed_objects += 1;
             removed_bytes = removed_bytes.saturating_add(size);
             total = total.saturating_sub(size);
@@ -400,60 +461,60 @@ fn hash_and_kind(path: &Path) -> Result<(String, ArtifactKind)> {
     if path.is_file() {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"file");
-        let mut file = fs::File::open(path)
-            .with_context(|| format!("opening file '{}' for hashing", path.display()))?;
-        let mut buffer = [0u8; 16 * 1024];
-        loop {
-            let count = file
-                .read(&mut buffer)
-                .with_context(|| format!("reading file '{}' for hashing", path.display()))?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-        }
+        hash_content_into(path, &mut hasher)?;
         return Ok((hasher.finalize().to_hex().to_string(), ArtifactKind::File));
     }
 
     if path.is_dir() {
         let mut files: BTreeMap<String, PathBuf> = BTreeMap::new();
-        for entry in WalkDir::new(path) {
+        for entry in WalkDir::new(path).follow_links(true) {
             let entry = entry.context("walking output directory for hashing")?;
-            let child = entry.path();
-            if child.is_dir() {
+            if entry.file_type().is_dir() {
                 continue;
             }
-            let rel = child
+            let rel = entry
+                .path()
                 .strip_prefix(path)
                 .with_context(|| format!("stripping prefix '{}'", path.display()))?
                 .to_string_lossy()
                 .into_owned();
-            files.insert(rel, child.to_path_buf());
+            files.insert(rel, entry.path().to_path_buf());
         }
 
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"dir");
 
         for (rel, child) in files {
-            hasher.update(rel.as_bytes());
-            let mut file = fs::File::open(&child)
-                .with_context(|| format!("opening file '{}' for hashing", child.display()))?;
-            let mut buffer = [0u8; 16 * 1024];
-            loop {
-                let count = file
-                    .read(&mut buffer)
-                    .with_context(|| format!("reading file '{}' for hashing", child.display()))?;
-                if count == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..count]);
-            }
+            let rel_bytes = rel.as_bytes();
+            hasher.update(&(rel_bytes.len() as u64).to_le_bytes());
+            hasher.update(rel_bytes);
+            hash_content_into(&child, &mut hasher)?;
         }
 
         return Ok((hasher.finalize().to_hex().to_string(), ArtifactKind::Directory));
     }
 
     Err(anyhow!("artifact path '{}' must be a file or directory", path.display()))
+}
+
+fn hash_content_into(path: &Path, hasher: &mut blake3::Hasher) -> Result<()> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("reading metadata for '{}'", path.display()))?;
+    hasher.update(&metadata.len().to_le_bytes());
+
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("opening file '{}' for hashing", path.display()))?;
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .with_context(|| format!("reading file '{}' for hashing", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(())
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
@@ -470,7 +531,7 @@ fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
         fs::create_dir_all(dest)
             .with_context(|| format!("creating directory '{}'", dest.display()))?;
 
-        for entry in WalkDir::new(src) {
+        for entry in WalkDir::new(src).follow_links(true) {
             let entry = entry.context("walking directory while copying tree")?;
             let child = entry.path();
             let rel = child
@@ -482,7 +543,7 @@ fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
             }
 
             let target = dest.join(rel);
-            if child.is_dir() {
+            if entry.file_type().is_dir() {
                 fs::create_dir_all(&target)
                     .with_context(|| format!("creating directory '{}'", target.display()))?;
             } else {
@@ -968,5 +1029,119 @@ mod tests {
         let error =
             store.restore_artifacts(&workspace, &artifacts).expect_err("invalid hash should fail");
         assert!(error.to_string().contains("expected 64 hex characters"));
+    }
+
+    #[test]
+    fn restore_artifacts_rejects_corrupted_object() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let output_rel = PathBuf::from("dist/app.txt");
+        let output_abs = workspace.join(&output_rel);
+        fs::create_dir_all(output_abs.parent().expect("parent")).expect("create dist");
+        fs::write(&output_abs, "hello").expect("write output");
+
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("create store");
+        let artifacts = store
+            .store_artifacts(&workspace, std::slice::from_ref(&output_rel))
+            .expect("store artifacts");
+
+        let object_file = store.objects_dir.join(&artifacts[0].object_hash);
+        fs::write(&object_file, "tampered content").expect("tamper");
+
+        let error = store
+            .restore_artifacts(&workspace, &artifacts)
+            .expect_err("corrupted object should fail");
+        assert!(error.to_string().contains("corrupted"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn prune_never_deletes_objects_referenced_by_history() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let output_rel = PathBuf::from("dist/app.txt");
+        let output_abs = workspace.join(&output_rel);
+        fs::create_dir_all(output_abs.parent().expect("parent")).expect("create dist");
+        fs::write(&output_abs, "hello").expect("write output");
+
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("create store");
+        let artifacts = store
+            .store_artifacts(&workspace, std::slice::from_ref(&output_rel))
+            .expect("store artifacts");
+        store
+            .save_execution(&ExecutionRecord {
+                task_name: "build".to_string(),
+                fingerprint: "fp-1".to_string(),
+                manifest: BTreeMap::new(),
+                artifacts: artifacts.clone(),
+                stdout: String::new(),
+                stderr: String::new(),
+                created_at: 1,
+                duration_ms: 0,
+            })
+            .expect("save execution referencing the object");
+
+        let report = store.prune(0).expect("prune with a 0MB budget");
+
+        assert_eq!(report.removed_objects, 0, "referenced object must survive prune");
+        let object_dir = store.objects_dir.join(&artifacts[0].object_hash);
+        assert!(object_dir.exists());
+    }
+
+    #[test]
+    fn prune_removes_unreferenced_objects() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let output_rel = PathBuf::from("dist/app.txt");
+        let output_abs = workspace.join(&output_rel);
+        fs::create_dir_all(output_abs.parent().expect("parent")).expect("create dist");
+        fs::write(&output_abs, "hello").expect("write output");
+
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("create store");
+        let artifacts = store
+            .store_artifacts(&workspace, std::slice::from_ref(&output_rel))
+            .expect("store artifacts");
+
+        let report = store.prune(0).expect("prune with a 0MB budget");
+
+        assert_eq!(report.removed_objects, 1);
+        let object_dir = store.objects_dir.join(&artifacts[0].object_hash);
+        assert!(!object_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_artifacts_traverses_symlinked_output_subdirectories() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+
+        let real_dir = tmp.path().join("real");
+        fs::create_dir_all(&real_dir).expect("create real dir");
+        fs::write(real_dir.join("file.txt"), "content").expect("write file");
+
+        let out_rel = PathBuf::from("dist");
+        let out_abs = workspace.join(&out_rel);
+        fs::create_dir_all(&out_abs).expect("create dist");
+        symlink(&real_dir, out_abs.join("linked")).expect("symlink dir");
+
+        let store = LocalArtifactStore::new(tmp.path().join("cache")).expect("create store");
+        let artifacts = store
+            .store_artifacts(&workspace, std::slice::from_ref(&out_rel))
+            .expect("store artifacts");
+
+        fs::remove_dir_all(&out_abs).expect("remove original output");
+        store.restore_artifacts(&workspace, &artifacts).expect("restore output");
+
+        let restored = fs::read_to_string(out_abs.join("linked").join("file.txt"))
+            .expect("read restored file behind former symlink");
+        assert_eq!(restored, "content");
     }
 }
