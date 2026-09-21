@@ -25,8 +25,7 @@ cargo test --workspace
 
 ## CI policy
 - PRs must be green in GitHub Actions before merge.
-- Use feature branches, then merge to `develop`.
-- Merge `develop` to `main` only when release-ready.
+- Use feature branches, then merge straight to `main`.
 - Cut release tags from green `main` only.
 
 ## Isolation guidance
