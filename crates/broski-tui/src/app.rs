@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use broski_core::cancel::{CancelLevel, CancellationToken};
 use broski_core::{
-    load_broskifile, validate_broskifile, BroskiFile, Executor, ProgressEvent, RunOptions,
-    RunSummary, TaskGraph, TaskMode,
+    acquire_runtime_lock, load_broskifile, validate_broskifile, BroskiFile, Executor,
+    ProgressEvent, RunOptions, RunSummary, TaskGraph, TaskMode,
 };
 use broski_store::ArtifactStore;
 use crossterm::event::{
@@ -220,7 +220,10 @@ fn drive_launcher(
                         dirty = true;
                     }
                     LauncherDecision::PruneCache(mb) => {
-                        match store.prune(mb) {
+                        let prune_result = acquire_runtime_lock(workspace)
+                            .map_err(anyhow::Error::from)
+                            .and_then(|_lock| store.prune(mb).map_err(anyhow::Error::from));
+                        match prune_result {
                             Ok(report) => {
                                 let mb_freed = report.removed_bytes / (1024 * 1024);
                                 launcher.record_status(format!(

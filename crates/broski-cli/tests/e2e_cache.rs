@@ -75,3 +75,26 @@ fn test_implicit_run_executes_task() {
         .success()
         .stdout(predicate::str::contains("executed: process"));
 }
+
+#[test]
+fn test_cache_prune_refuses_while_runtime_lock_is_active() {
+    let temp = support::workspace_from_fixture("basic");
+    let workspace = temp.path();
+
+    support::broski_cmd(workspace).arg("run").arg("process").assert().success();
+
+    let runtime_dir = workspace.join(".broski/runtime");
+    fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    let lock = format!(
+        r#"{{"pid":{},"started_at":1,"host":"test","process_start_ticks":null}}"#,
+        std::process::id()
+    );
+    fs::write(runtime_dir.join("active.lock"), lock).expect("write fake active lock");
+
+    support::broski_cmd(workspace)
+        .arg("cache")
+        .arg("prune")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("another Broski execution is active"));
+}
