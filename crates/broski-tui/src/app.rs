@@ -31,7 +31,9 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use ratatui::style::Style;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 
 use crate::keys::{map_key, Action};
@@ -239,9 +241,8 @@ fn drive_launcher(
                         dirty = true;
                     }
                     LauncherDecision::PruneCache(mb) => {
-                        let prune_result = acquire_runtime_lock(workspace)
-                            .map_err(anyhow::Error::from)
-                            .and_then(|_lock| store.prune(mb).map_err(anyhow::Error::from));
+                        let prune_result =
+                            acquire_runtime_lock(workspace).and_then(|_lock| store.prune(mb));
                         match prune_result {
                             Ok(report) => {
                                 let mb_freed = report.removed_bytes / (1024 * 1024);
@@ -428,6 +429,9 @@ fn run_target_with_dashboard(
         });
 
         let decision = drive_loop(terminal, event_rx, palette, etas, &cancellation)?;
+        if matches!(decision, LoopDecision::Quit) {
+            wait_for_executor_with_feedback(terminal, palette, &executor_handle, &cancellation)?;
+        }
         let iter_summary_result: Result<RunSummary> =
             executor_handle.join().map_err(|_| anyhow::anyhow!("executor thread panicked"))?;
 
@@ -552,6 +556,63 @@ fn prefetch_etas(
     etas
 }
 
+fn mark_finished_on_unexpected_disconnect(state: &mut TuiState) -> bool {
+    if state.run_finished {
+        return false;
+    }
+    state.run_finished = true;
+    true
+}
+
+fn wait_for_executor_with_feedback(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    palette: &Palette,
+    handle: &thread::JoinHandle<Result<RunSummary>>,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    let tick = Duration::from_millis(TICK_MS);
+    loop {
+        if handle.is_finished() {
+            return Ok(());
+        }
+        redraw_terminating_banner(terminal, palette)?;
+        if event::poll(tick).context("polling terminal events while terminating")? {
+            if let Event::Key(key) =
+                event::read().context("reading terminal event while terminating")?
+            {
+                if matches!(map_key(key), Action::Interrupt | Action::Quit) {
+                    cancellation.cancel(CancelLevel::Hard);
+                    let _ = leave_terminal(terminal);
+                    eprintln!(
+                        "[broski tui] forced exit; the running task may still be alive in the background"
+                    );
+                    std::process::exit(130);
+                }
+            }
+        }
+    }
+}
+
+fn redraw_terminating_banner(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    palette: &Palette,
+) -> Result<()> {
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let block = Block::default()
+                .title(" broski ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.accent));
+            let text = Paragraph::new("terminating… (press Ctrl-C again to force quit)")
+                .alignment(Alignment::Center)
+                .block(block);
+            frame.render_widget(text, area);
+        })
+        .context("drawing terminating banner")?;
+    Ok(())
+}
+
 fn drive_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     event_rx: mpsc::Receiver<ProgressEvent>,
@@ -608,6 +669,9 @@ fn drive_loop(
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         channel_open = false;
+                        if mark_finished_on_unexpected_disconnect(&mut state) {
+                            dirty = true;
+                        }
                         break;
                     }
                 }
@@ -870,6 +934,29 @@ mod tests {
             IterationOutcome::Quit(Ok(_)) => {}
             _ => panic!("expected Quit(Ok(..))"),
         }
+    }
+
+    #[test]
+    fn unexpected_disconnect_marks_run_finished_once() {
+        let mut state = TuiState::new();
+        assert!(!state.run_finished);
+
+        assert!(mark_finished_on_unexpected_disconnect(&mut state));
+        assert!(state.run_finished);
+
+        assert!(
+            !mark_finished_on_unexpected_disconnect(&mut state),
+            "should be a no-op once already finished"
+        );
+    }
+
+    #[test]
+    fn disconnect_after_normal_completion_is_a_no_op() {
+        let mut state = TuiState::new();
+        state.run_finished = true;
+
+        assert!(!mark_finished_on_unexpected_disconnect(&mut state));
+        assert!(state.run_finished);
     }
 
     #[test]

@@ -235,10 +235,7 @@ impl LauncherState {
         let tail = parts.next().unwrap_or("").trim();
 
         let mut head_tokens = head.split_whitespace();
-        let target = match head_tokens.next() {
-            Some(t) => t.to_string(),
-            None => return None,
-        };
+        let target = head_tokens.next()?.to_string();
 
         let mut passthrough: Vec<String> = head_tokens.map(str::to_string).collect();
         if !tail.is_empty() {
