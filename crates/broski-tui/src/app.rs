@@ -55,6 +55,23 @@ enum LoopDecision {
     Rerun(RerunRequest),
 }
 
+enum IterationOutcome {
+    Quit(Result<RunSummary>),
+    Rerun(RerunRequest),
+}
+
+// A Rerun decision always wins over a task-failure error, since rerunning
+// the task the user just fixed is the entire point of pressing x/X.
+fn resolve_loop_iteration(
+    decision: LoopDecision,
+    iter_summary_result: Result<RunSummary>,
+) -> IterationOutcome {
+    match decision {
+        LoopDecision::Quit => IterationOutcome::Quit(iter_summary_result),
+        LoopDecision::Rerun(req) => IterationOutcome::Rerun(req),
+    }
+}
+
 /// Foreground poll cadence. Keys come in via `event::poll` so this also
 /// caps the redraw rate when no events are arriving.
 const TICK_MS: u64 = 75;
@@ -408,17 +425,15 @@ fn run_target_with_dashboard(
                 .run_target(&exec_target, &exec_opts)
         });
 
-        let decision = drive_loop(terminal, event_rx, palette, etas, &cancellation);
-        let iter_summary =
-            executor_handle.join().map_err(|_| anyhow::anyhow!("executor thread panicked"))??;
+        let decision = drive_loop(terminal, event_rx, palette, etas, &cancellation)?;
+        let iter_summary_result: Result<RunSummary> =
+            executor_handle.join().map_err(|_| anyhow::anyhow!("executor thread panicked"))?;
 
-        match decision? {
-            LoopDecision::Quit => break iter_summary,
-            LoopDecision::Rerun(req) => {
+        match resolve_loop_iteration(decision, iter_summary_result) {
+            IterationOutcome::Quit(result) => break result?,
+            IterationOutcome::Rerun(req) => {
                 current_target = req.task.clone();
                 pending_rerun = Some(req);
-                // drive_loop creates a fresh TuiState each call, so no
-                // manual state reset is needed here.
             }
         }
     };
@@ -801,6 +816,49 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rerun_decision_wins_over_a_failed_run() {
+        let req = RerunRequest { task: "build".to_string(), force_all: false };
+        let failed_run: Result<RunSummary> = Err(anyhow::anyhow!("task 'build' failed"));
+
+        match resolve_loop_iteration(LoopDecision::Rerun(req.clone()), failed_run) {
+            IterationOutcome::Rerun(got) => assert_eq!(got, req),
+            IterationOutcome::Quit(_) => panic!("a Rerun decision must not be discarded"),
+        }
+    }
+
+    #[test]
+    fn rerun_decision_wins_over_a_successful_run() {
+        let req = RerunRequest { task: "build".to_string(), force_all: true };
+        let ok_run: Result<RunSummary> = Ok(RunSummary::default());
+
+        match resolve_loop_iteration(LoopDecision::Rerun(req.clone()), ok_run) {
+            IterationOutcome::Rerun(got) => assert_eq!(got, req),
+            IterationOutcome::Quit(_) => panic!("a Rerun decision must not be discarded"),
+        }
+    }
+
+    #[test]
+    fn quit_decision_surfaces_the_run_error() {
+        let failed_run: Result<RunSummary> = Err(anyhow::anyhow!("task 'build' failed"));
+
+        match resolve_loop_iteration(LoopDecision::Quit, failed_run) {
+            IterationOutcome::Quit(Err(err)) => assert!(err.to_string().contains("build")),
+            IterationOutcome::Quit(Ok(_)) => panic!("expected Quit(Err(..))"),
+            IterationOutcome::Rerun(_) => panic!("Quit decision must not become a Rerun"),
+        }
+    }
+
+    #[test]
+    fn quit_decision_surfaces_success() {
+        let ok_run: Result<RunSummary> = Ok(RunSummary::default());
+
+        match resolve_loop_iteration(LoopDecision::Quit, ok_run) {
+            IterationOutcome::Quit(Ok(_)) => {}
+            _ => panic!("expected Quit(Ok(..))"),
+        }
+    }
 
     #[test]
     fn first_interrupt_goes_soft_without_quitting() {
