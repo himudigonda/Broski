@@ -5,6 +5,9 @@
 //! impossible to typo.
 
 use std::str::FromStr;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use ratatui::style::Color;
@@ -133,12 +136,27 @@ enum TerminalKind {
 /// uses internally.
 const LIGHT_LUMA_THRESHOLD: f32 = 0.5;
 
+// Bounds how long the OSC 11 probe may block startup on a wedged terminal driver.
+const AUTO_DETECT_TIMEOUT: Duration = Duration::from_millis(500);
+
 fn detect_terminal_kind() -> Option<TerminalKind> {
-    match terminal_light::luma() {
-        Ok(luma) => {
+    resolve_luma_within(AUTO_DETECT_TIMEOUT, terminal_light::luma)
+}
+
+fn resolve_luma_within<F>(timeout: Duration, probe: F) -> Option<TerminalKind>
+where
+    F: FnOnce() -> std::result::Result<f32, terminal_light::TlError> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(probe());
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(luma)) => {
             Some(if luma < LIGHT_LUMA_THRESHOLD { TerminalKind::Dark } else { TerminalKind::Light })
         }
-        Err(_) => None,
+        Ok(Err(_)) | Err(_) => None,
     }
 }
 
@@ -181,6 +199,33 @@ pub struct Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn luma_probe_timeout_bounds_a_wedged_probe() {
+        let started = std::time::Instant::now();
+        let result = resolve_luma_within(Duration::from_millis(50), || {
+            thread::sleep(Duration::from_secs(10));
+            Ok(0.1)
+        });
+        assert_eq!(result, None, "a wedged probe must resolve to None, not the fallback value");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "resolve_luma_within must not wait for the wedged probe: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn luma_probe_resolves_dark_when_fast() {
+        let result = resolve_luma_within(Duration::from_millis(500), || Ok(0.1));
+        assert_eq!(result, Some(TerminalKind::Dark));
+    }
+
+    #[test]
+    fn luma_probe_resolves_light_when_fast() {
+        let result = resolve_luma_within(Duration::from_millis(500), || Ok(0.9));
+        assert_eq!(result, Some(TerminalKind::Light));
+    }
 
     #[test]
     fn theme_round_trips_by_name() {

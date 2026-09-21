@@ -149,22 +149,86 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
+fn task_has_reason_row(state: &TuiState, name: &str) -> bool {
+    state.tasks.get(name).is_some_and(|info| !info.cache_reasons.is_empty())
+}
+
 /// Translate a flat `task_order` index into the visible list index, accounting
-/// for the layer-divider rows we inject between layers.
+/// for the layer-divider rows and per-task explain-reason rows we inject.
 fn visible_index(state: &TuiState, flat_idx: usize) -> usize {
     let mut count = 0usize;
     let mut visible = 0usize;
     for (layer_idx, layer) in state.layers.iter().enumerate() {
-        for _ in layer {
+        for name in layer {
             if count == flat_idx {
                 return visible;
             }
             count += 1;
             visible += 1;
+            if task_has_reason_row(state, name) {
+                visible += 1;
+            }
         }
         if layer_idx + 1 < state.layers.len() {
             visible += 1;
         }
     }
     visible.saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::TaskInfo;
+    use std::collections::HashMap;
+
+    fn state_with_reason_on_first_task() -> TuiState {
+        let mut tasks = HashMap::new();
+        tasks.insert(
+            "a".to_string(),
+            TaskInfo {
+                cache_reasons: vec!["cache miss: input changed".to_string()],
+                ..Default::default()
+            },
+        );
+        tasks.insert("b".to_string(), TaskInfo::default());
+        tasks.insert("c".to_string(), TaskInfo::default());
+
+        TuiState {
+            layers: vec![vec!["a".to_string(), "b".to_string()], vec!["c".to_string()]],
+            task_order: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            tasks,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn visible_index_matches_flat_index_when_no_reason_rows() {
+        let state = TuiState {
+            layers: vec![vec!["a".to_string(), "b".to_string()], vec!["c".to_string()]],
+            task_order: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            tasks: HashMap::new(),
+            ..Default::default()
+        };
+        assert_eq!(visible_index(&state, 0), 0);
+        assert_eq!(visible_index(&state, 1), 1);
+        assert_eq!(visible_index(&state, 2), 3);
+    }
+
+    #[test]
+    fn visible_index_skips_reason_row_for_tasks_after_it() {
+        let state = state_with_reason_on_first_task();
+
+        assert_eq!(visible_index(&state, 0), 0, "task a is unaffected by its own reason row");
+        assert_eq!(
+            visible_index(&state, 1),
+            2,
+            "task b must shift past a's inline reason row at visible index 1"
+        );
+        assert_eq!(
+            visible_index(&state, 2),
+            4,
+            "task c must shift past a's reason row and the layer divider"
+        );
+    }
 }

@@ -1,17 +1,55 @@
 ---
-sidebar_position: 2
+sidebar_position: 3
 ---
 
 # Watch Mode
 
 ```bash
 broski run test --watch
+broski test --watch
 ```
 
-Behavior:
+## What gets watched
 
-- reruns target graph on input changes
-- ignores `.git`, `.broski`, and declared outputs
-- debounced to avoid rerun storms
+Watch mode resolves the target's full dependency graph up front and computes a watch set from every task in it:
 
-Interactive tasks may already watch files internally; combining external and internal watchers can duplicate triggers.
+- **Tracked inputs**: every path each task's `@in` patterns resolve to, across the whole graph. If **no** task in
+  the graph declares any `@in` at all, Broski falls back to watching the entire workspace root.
+- **Watch roots**: the parent directory of each tracked input (or the input itself if it's already a directory)
+  — this is what's actually registered with the OS-level file watcher (`notify`, recursive mode).
+- **Ignored paths**: `.git/`, `.broski/`, and every task's declared `@out` paths are excluded, so a task writing
+  its own output doesn't trigger an infinite rerun loop.
+
+A filesystem event only triggers a rerun if its path falls under a tracked input and is **not** under an ignored
+prefix.
+
+## Debounce behavior
+
+The first relevant change starts a **200ms** debounce window; any further relevant events that arrive inside
+that window are drained (coalesced) before the rerun fires, so a burst of saves (e.g. a formatter rewriting
+several files) triggers exactly one rerun, not one per file.
+
+## What actually reruns
+
+Each rerun re-executes `run_target_once` for the same resolved target with `--watch` itself turned off for that
+inner call (so a single change doesn't recursively re-arm watch mode) — normal caching, fingerprinting, and
+`--explain` semantics all still apply per rerun. Watch mode itself never exits on its own; stop it with `Ctrl-C`.
+
+## Interactive tasks and `--watch`
+
+If the target resolves to (or depends on) an `@mode interactive` task, Broski still applies `--watch` at the
+external file-watcher level, but prints a warning:
+
+```text
+info: task '<name>' is interactive; internal watchers may conflict with --watch
+```
+
+Many interactive tasks (dev servers, bundlers) already have their own internal file watcher. Running Broski's
+`--watch` on top of one means both watchers can fire on the same change — you'll likely see a double reload.
+Prefer relying on the tool's own watcher for interactive tasks, and reserve `--watch` for graph-mode tasks
+(tests, linters, builds) that have no watcher of their own.
+
+## Related pages
+
+- [Commands and Flags](./commands)
+- [Annotations](../dsl/annotations)

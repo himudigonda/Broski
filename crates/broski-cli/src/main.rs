@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use broski_cache::LocalArtifactStore;
 use broski_core::{
-    load_broskifile, sweep_runtime_state, validate_broskifile, Executor, IsolationMode, RunOptions,
-    TaskGraph,
+    acquire_runtime_lock, load_broskifile, sweep_runtime_state, validate_broskifile, Executor,
+    IsolationMode, RunOptions, TaskGraph,
 };
 use broski_store::ArtifactStore;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -133,10 +133,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let workspace = cli
-        .workspace
-        .canonicalize()
-        .or_else(|_| Ok::<PathBuf, anyhow::Error>(cli.workspace.clone()))?;
+    let workspace = cli.workspace.canonicalize().with_context(|| {
+        format!("workspace '{}' not found or inaccessible", cli.workspace.display())
+    })?;
 
     match cli.command {
         None => {
@@ -543,6 +542,8 @@ fn run_cache_command(workspace: &Path, command: CacheCommand) -> Result<()> {
 
     match command {
         CacheCommand::Prune { max_size } => {
+            let _lock = acquire_runtime_lock(workspace)
+                .context("cache prune requires exclusive access to the workspace")?;
             let report = store.prune(max_size)?;
             println!(
                 "pruned objects: {} (freed {} bytes), remaining {} bytes",

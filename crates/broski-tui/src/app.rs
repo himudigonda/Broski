@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use broski_core::cancel::{CancelLevel, CancellationToken};
 use broski_core::{
-    load_broskifile, validate_broskifile, BroskiFile, Executor, ProgressEvent, RunOptions,
-    RunSummary, TaskGraph, TaskMode,
+    acquire_runtime_lock, load_broskifile, validate_broskifile, BroskiFile, Executor,
+    ProgressEvent, RunOptions, RunSummary, TaskGraph, TaskMode,
 };
 use broski_store::ArtifactStore;
 use crossterm::event::{
@@ -31,7 +31,9 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use ratatui::style::Style;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 
 use crate::keys::{map_key, Action};
@@ -55,6 +57,23 @@ enum LoopDecision {
     Rerun(RerunRequest),
 }
 
+enum IterationOutcome {
+    Quit(Result<RunSummary>),
+    Rerun(RerunRequest),
+}
+
+// A Rerun decision always wins over a task-failure error, since rerunning
+// the task the user just fixed is the entire point of pressing x/X.
+fn resolve_loop_iteration(
+    decision: LoopDecision,
+    iter_summary_result: Result<RunSummary>,
+) -> IterationOutcome {
+    match decision {
+        LoopDecision::Quit => IterationOutcome::Quit(iter_summary_result),
+        LoopDecision::Rerun(req) => IterationOutcome::Rerun(req),
+    }
+}
+
 /// Foreground poll cadence. Keys come in via `event::poll` so this also
 /// caps the redraw rate when no events are arriving.
 const TICK_MS: u64 = 75;
@@ -75,6 +94,7 @@ pub fn run(
     base_options: RunOptions,
     theme: Theme,
 ) -> Result<RunSummary> {
+    install_terminal_restore_panic_hook();
     let mut terminal = enter_terminal().context("entering alt screen / raw mode")?;
     let palette = theme.palette();
     let result = run_target_in_terminal(
@@ -101,6 +121,7 @@ pub fn run_launcher(
     base_options: RunOptions,
     theme: Theme,
 ) -> Result<()> {
+    install_terminal_restore_panic_hook();
     let mut terminal = enter_terminal().context("entering alt screen / raw mode")?;
     let result = drive_launcher(&mut terminal, &workspace, &config, &store, &base_options, theme);
     let _ = leave_terminal(&mut terminal);
@@ -220,7 +241,9 @@ fn drive_launcher(
                         dirty = true;
                     }
                     LauncherDecision::PruneCache(mb) => {
-                        match store.prune(mb) {
+                        let prune_result =
+                            acquire_runtime_lock(workspace).and_then(|_lock| store.prune(mb));
+                        match prune_result {
                             Ok(report) => {
                                 let mb_freed = report.removed_bytes / (1024 * 1024);
                                 launcher.record_status(format!(
@@ -405,17 +428,18 @@ fn run_target_with_dashboard(
                 .run_target(&exec_target, &exec_opts)
         });
 
-        let decision = drive_loop(terminal, event_rx, palette, etas, &cancellation);
-        let iter_summary =
-            executor_handle.join().map_err(|_| anyhow::anyhow!("executor thread panicked"))??;
+        let decision = drive_loop(terminal, event_rx, palette, etas, &cancellation)?;
+        if matches!(decision, LoopDecision::Quit) {
+            wait_for_executor_with_feedback(terminal, palette, &executor_handle, &cancellation)?;
+        }
+        let iter_summary_result: Result<RunSummary> =
+            executor_handle.join().map_err(|_| anyhow::anyhow!("executor thread panicked"))?;
 
-        match decision? {
-            LoopDecision::Quit => break iter_summary,
-            LoopDecision::Rerun(req) => {
+        match resolve_loop_iteration(decision, iter_summary_result) {
+            IterationOutcome::Quit(result) => break result?,
+            IterationOutcome::Rerun(req) => {
                 current_target = req.task.clone();
                 pending_rerun = Some(req);
-                // drive_loop creates a fresh TuiState each call, so no
-                // manual state reset is needed here.
             }
         }
     };
@@ -474,10 +498,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
-/// Resolve the target's full task graph and report whether any
-/// transitively-required task runs in [`TaskMode::Interactive`].
-/// Best-effort: when graph resolution fails we conservatively return
-/// `false` and let the dashboard try its luck.
+// @confirm also needs a suspended terminal: its read_line() expects \n from
+// Enter, and raw mode delivers \r instead, so it would never return.
 fn target_has_interactive_task(config: &BroskiFile, target: &str) -> bool {
     let resolved = match config.resolve_task_name(target) {
         Ok(name) => name,
@@ -495,7 +517,7 @@ fn target_has_interactive_task(config: &BroskiFile, target: &str) -> bool {
         config
             .task
             .get(name)
-            .map(|spec| spec.inferred_mode() == TaskMode::Interactive)
+            .map(|spec| spec.inferred_mode() == TaskMode::Interactive || spec.confirm.is_some())
             .unwrap_or(false)
     })
 }
@@ -530,6 +552,63 @@ fn prefetch_etas(
         }
     }
     etas
+}
+
+fn mark_finished_on_unexpected_disconnect(state: &mut TuiState) -> bool {
+    if state.run_finished {
+        return false;
+    }
+    state.run_finished = true;
+    true
+}
+
+fn wait_for_executor_with_feedback(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    palette: &Palette,
+    handle: &thread::JoinHandle<Result<RunSummary>>,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    let tick = Duration::from_millis(TICK_MS);
+    loop {
+        if handle.is_finished() {
+            return Ok(());
+        }
+        redraw_terminating_banner(terminal, palette)?;
+        if event::poll(tick).context("polling terminal events while terminating")? {
+            if let Event::Key(key) =
+                event::read().context("reading terminal event while terminating")?
+            {
+                if matches!(map_key(key), Action::Interrupt | Action::Quit) {
+                    cancellation.cancel(CancelLevel::Hard);
+                    let _ = leave_terminal(terminal);
+                    eprintln!(
+                        "[broski tui] forced exit; the running task may still be alive in the background"
+                    );
+                    std::process::exit(130);
+                }
+            }
+        }
+    }
+}
+
+fn redraw_terminating_banner(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    palette: &Palette,
+) -> Result<()> {
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let block = Block::default()
+                .title(" broski ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.accent));
+            let text = Paragraph::new("terminating… (press Ctrl-C again to force quit)")
+                .alignment(Alignment::Center)
+                .block(block);
+            frame.render_widget(text, area);
+        })
+        .context("drawing terminating banner")?;
+    Ok(())
 }
 
 fn drive_loop(
@@ -588,6 +667,9 @@ fn drive_loop(
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         channel_open = false;
+                        if mark_finished_on_unexpected_disconnect(&mut state) {
+                            dirty = true;
+                        }
                         break;
                     }
                 }
@@ -795,9 +877,85 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(
     Ok(())
 }
 
+// Release builds set panic = "abort", where a Drop guard's destructor never runs; a panic hook does.
+fn install_terminal_restore_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        default_hook(info);
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rerun_decision_wins_over_a_failed_run() {
+        let req = RerunRequest { task: "build".to_string(), force_all: false };
+        let failed_run: Result<RunSummary> = Err(anyhow::anyhow!("task 'build' failed"));
+
+        match resolve_loop_iteration(LoopDecision::Rerun(req.clone()), failed_run) {
+            IterationOutcome::Rerun(got) => assert_eq!(got, req),
+            IterationOutcome::Quit(_) => panic!("a Rerun decision must not be discarded"),
+        }
+    }
+
+    #[test]
+    fn rerun_decision_wins_over_a_successful_run() {
+        let req = RerunRequest { task: "build".to_string(), force_all: true };
+        let ok_run: Result<RunSummary> = Ok(RunSummary::default());
+
+        match resolve_loop_iteration(LoopDecision::Rerun(req.clone()), ok_run) {
+            IterationOutcome::Rerun(got) => assert_eq!(got, req),
+            IterationOutcome::Quit(_) => panic!("a Rerun decision must not be discarded"),
+        }
+    }
+
+    #[test]
+    fn quit_decision_surfaces_the_run_error() {
+        let failed_run: Result<RunSummary> = Err(anyhow::anyhow!("task 'build' failed"));
+
+        match resolve_loop_iteration(LoopDecision::Quit, failed_run) {
+            IterationOutcome::Quit(Err(err)) => assert!(err.to_string().contains("build")),
+            IterationOutcome::Quit(Ok(_)) => panic!("expected Quit(Err(..))"),
+            IterationOutcome::Rerun(_) => panic!("Quit decision must not become a Rerun"),
+        }
+    }
+
+    #[test]
+    fn quit_decision_surfaces_success() {
+        let ok_run: Result<RunSummary> = Ok(RunSummary::default());
+
+        match resolve_loop_iteration(LoopDecision::Quit, ok_run) {
+            IterationOutcome::Quit(Ok(_)) => {}
+            _ => panic!("expected Quit(Ok(..))"),
+        }
+    }
+
+    #[test]
+    fn unexpected_disconnect_marks_run_finished_once() {
+        let mut state = TuiState::new();
+        assert!(!state.run_finished);
+
+        assert!(mark_finished_on_unexpected_disconnect(&mut state));
+        assert!(state.run_finished);
+
+        assert!(
+            !mark_finished_on_unexpected_disconnect(&mut state),
+            "should be a no-op once already finished"
+        );
+    }
+
+    #[test]
+    fn disconnect_after_normal_completion_is_a_no_op() {
+        let mut state = TuiState::new();
+        state.run_finished = true;
+
+        assert!(!mark_finished_on_unexpected_disconnect(&mut state));
+        assert!(state.run_finished);
+    }
 
     #[test]
     fn first_interrupt_goes_soft_without_quitting() {
@@ -1028,6 +1186,46 @@ mod tests {
             load_env: vec![],
         };
         assert!(target_has_interactive_task(&config, "dev"));
+    }
+
+    #[test]
+    fn target_with_confirm_on_a_graph_task_needs_a_suspended_terminal() {
+        use broski_core::model::{BroskiSection, RunSpec, TaskSpec};
+        let mut tasks = std::collections::BTreeMap::new();
+        tasks.insert(
+            "release".to_string(),
+            TaskSpec {
+                deps: vec![],
+                description: None,
+                resolved_variables: Default::default(),
+                inputs: vec![],
+                stage_ro: vec![],
+                outputs: vec!["dist/out".into()],
+                env: Default::default(),
+                env_inherit: vec![],
+                secret_env: vec![],
+                run: RunSpec::Shell("echo releasing".into()),
+                isolation: None,
+                mode: None,
+                working_dir: None,
+                params: vec![],
+                private: false,
+                confirm: Some("Ship release artifacts? [y/N]".to_string()),
+                shell_override: None,
+                requires: vec![],
+            },
+        );
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".into() },
+            task: tasks,
+            alias: Default::default(),
+            load_env: vec![],
+        };
+        assert!(
+            target_has_interactive_task(&config, "release"),
+            "a graph-mode task with @confirm must run with the terminal suspended, \
+             not under raw mode where read_line() never sees a \\n"
+        );
     }
 
     #[test]

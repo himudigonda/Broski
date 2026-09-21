@@ -1,0 +1,189 @@
+---
+sidebar_position: 2
+---
+
+# TUI Dashboard
+
+Broski ships a live `ratatui`-based dashboard (`broski-tui`) for watching a run in real time, plus an
+interactive launcher for picking and rerunning targets without leaving the terminal. This page is the full
+reference; see [Commands and Flags](./commands) for the quick summary and how the three entry points differ.
+
+## Entry points
+
+```bash
+broski tui                        # launcher: pick or type a target
+broski tui <task>                 # dashboard for one target directly
+broski run <task> --tui           # same dashboard, via `run`
+```
+
+| Form | Flags available | Notes |
+| --- | --- | --- |
+| `broski tui [task]` | `--force`, `--no-cache`, `--force-isolation`, `--jobs <n>`, `--explain`, `--theme <name>`, trailing `[-- args]` | No `--dry-run` or `--watch` — they don't exist on this subcommand. |
+| `broski run <task> --tui` | All of `run`'s flags except `--dry-run`/`--watch` (rejected: `--tui cannot be combined with --dry-run or --watch`) | `--explain` **is** allowed here (relaxed in v0.7.0). |
+
+Neither `--tui` nor `--theme` are recognized by **implicit** invocation (`broski <task> --tui`) — use one of the
+two forms above explicitly.
+
+## Dashboard (single target)
+
+Layout: a DAG pane (left, ~35% width) and a log pane (right, ~65%) on top, a one-line summary bar, and a help
+footer — in that order, top to bottom.
+
+### DAG pane
+
+- Each task shows an icon by state: `●` running, `✓` done, `⊙` cached, `✗` failed, `·` dry-run, `⊘` skipped,
+  `○` queued/unknown.
+- Terminal states additionally get an inline tag next to the name: `(cached)`, `(skipped)`, `(dry-run)`,
+  `(failed)`. Running/queued/done get no tag.
+- Once a task has a nonzero duration it's shown; queued/running tasks with a prefetched ETA (from the most
+  recent successful run) show `~<duration>`.
+- With `--explain`, a dim sub-line `↳ <reason>` appears under each task — **only the first cache-miss reason**,
+  not the full list. The complete list is in the log pane (see below).
+- Topological layers are separated by an indented `↓` divider line.
+- Before a run starts: `(waiting for run start…)`.
+
+### Log pane
+
+- Title reads `Logs · <task>`, or `Logs · <task> · ↑<N>` while scrolled up by `<N>` lines.
+- With `--explain`, the **full** `cache_reasons` list for the selected task is printed at the top (each line
+  prefixed with `⟶`), but only while you're scrolled to the bottom (`scrollback == 0`) — scroll up and it's
+  replaced by whatever historical output you scrolled to.
+- stdout and stderr are colored differently per the active theme.
+- A trailing `error: <message>` line is appended for a failed task, again only when at the bottom of the scroll.
+- Each task keeps a **4096-line ring buffer**; once full, the oldest lines are evicted and, if you're scrolled
+  up, your scroll offset is decremented by one so the visible window doesn't jump.
+
+### Summary bar
+
+One line: overall status word, `<done>/<total> done`, `running:N`, `cached:N`, `failed:N`, `queued:N`, and
+`eta ~<duration>` while still running. Status word logic: `CANCELLED` (finished + cancelled) → `FAILED`
+(finished + any failure) → `DONE` (finished, clean) → `TERMINATING` (hard-cancelling) → `CANCELLING`
+(soft-cancelling) → `RUNNING` (something active) → `IDLE`.
+
+### Help footer (exact text)
+
+```text
+q quit · Ctrl-C cancel · ↑/↓ select · PgUp/Dn · Shift-↑/↓ scroll logs · wheel · c clear · r redraw · x force-rerun · X force-all
+```
+
+### Dashboard key map
+
+| Key | Effect |
+| --- | --- |
+| `↑` / `↓` / `j` / `k` | Move selection cursor in the DAG pane. |
+| `Home` / `g` | Jump to first task. |
+| `End` / `G` | Jump to last task. |
+| `PageUp` / `PageDown` | Scroll log pane 10 lines. |
+| `Shift-↑` / `Shift-↓` | Scroll log pane 1 line. |
+| `Shift-Home` / `Shift-End` | Jump log pane to top / tail. |
+| Mouse wheel | Scroll log pane 3 lines per notch. |
+| `x` | **Force-rerun** the selected task only (its deps stay cached). Silently ignored while a run is still in progress — only takes effect once the run has finished. |
+| `X` | **Force-rerun** the entire original target (full `--force` semantics for every task). Same "after run finishes" rule as `x`. |
+| `c` | Clear logs for the selected task. |
+| `r` / `R` | Redraw. |
+| `Ctrl-C` | Two-stage cancel (see below). |
+| `q` / `Q` / `Esc` | Quit without cancelling. |
+
+Under the hood, `x` sets `RunOptions::force_tasks = {selected_task}`; `X` sets `RunOptions::force = true`. No
+cache entries are deleted — the existing record is simply bypassed and overwritten by the new execution. After
+either key, the dashboard resets to a fresh state and reruns live; press `x`/`X` again to keep iterating, `q` to
+exit.
+
+### Two-stage Ctrl-C
+
+First `Ctrl-C` requests a **soft** cancel (`CancelLevel::Soft`) — the executor stops starting new tasks but lets
+in-flight ones finish; status bar shows `CANCELLING`. A second `Ctrl-C` within **2 seconds** of the first
+escalates to a **hard** cancel (`CancelLevel::Hard`) — sends `SIGTERM` to every registered child PID — and the
+TUI exits; status bar shows `TERMINATING` then `CANCELLED`. A second press *after* the 2-second window resets to
+a fresh soft cancel rather than escalating.
+
+### Interactive tasks
+
+If the target's resolved dependency graph includes any `@mode interactive` task, the dashboard suspends itself
+for that task's duration: it leaves raw mode, drops mouse capture, and exits the alt screen, prints
+`[broski tui] running interactive task '<target>' — TUI paused`, hands the real TTY to the child directly
+(`Stdio::inherit`, no dashboard capture), then restores the dashboard exactly as it was once the child exits —
+even if the child failed. This detection is best-effort: if the dependency graph can't be resolved for some
+reason, it conservatively falls back to normal dashboard mode. Embedding the interactive child inside a PTY
+pane (so the DAG stays visible alongside it) is a known future gap, not yet implemented.
+
+## Launcher (`broski tui` with no task)
+
+Layout: header, a body split into a task list (left, ~45%) and a stats-or-slash-command panel (right, ~55%),
+a status banner, and an input box with a real terminal cursor. On terminals narrower than **80 columns**, the
+right column collapses and only the task list shows.
+
+- **Filtering**: typing filters the task list by case-insensitive substring match (ignoring any `-- ...`
+  passthrough suffix). `@private` tasks are excluded from the launcher's list entirely, same as `broski list`.
+- **Smart Enter**: if your typed input exactly matches a real task name, that wins; otherwise the currently
+  highlighted filtered match runs, carrying over any `--` passthrough. Empty input runs whatever's highlighted.
+  No match → status banner shows `no task matches '<input>' — pick one from the list`.
+- **Tab** completes the input to the highlighted task name (or, in slash mode, to the canonical command form).
+- **Esc** / **Ctrl-U** both clear the input without leaving the launcher.
+- **q** / **Ctrl-C** quit only when the input box is empty; otherwise they clear the input first (so you can't
+  lose in-progress typing by fat-fingering quit).
+- **`-- args`**: anything after `--` in the input (or trailing whitespace-split tokens) is forwarded as
+  `RunOptions::passthrough_args` to the task.
+- **Recent-run history**: newest-first, capped at **16 entries** per session, shown in the stats panel.
+
+## Slash commands
+
+Typing `/` at the start of the input switches to a command palette.
+
+| Command | Aliases | Effect |
+| --- | --- | --- |
+| `/help` | `/h`, `/?` | Show the key map + command catalog in the status banner. |
+| `/theme <name>` | — | Switch theme live (`default`, `dark`, `light`, `high-contrast`/`hc`, `auto`) — no restart. Missing arg → usage hint. Unknown name → `unknown theme '<x>' — try /help`, and **your typed input is preserved** so you can fix it. |
+| `/about` | `/version` | Show `broski <version>`. |
+| `/clear` | — | Wipe session run history and reset session counters. |
+| `/refresh` | `/reload` | Re-read `broskifile` from disk and rebuild the task list + stats. On failure: `refresh failed: <error>`. |
+| `/cache prune <MB>` | — | Prune the local artifact store to a size budget; reports objects pruned / bytes freed / remaining size. |
+| `/quit` | `/q`, `/exit` | Exit the launcher immediately. |
+
+Unknown command → `unknown command '/<x>' — try /help`. Unknown `/cache` subcommand → `unknown cache subcommand
+'<x>' — try /help`.
+
+## Themes
+
+| Name | Aliases |
+| --- | --- |
+| `default` | (empty string also resolves here) |
+| `dark` | |
+| `light` | |
+| `high-contrast` | `highcontrast`, `hc` |
+| `auto` | |
+
+Resolution precedence: `--theme <name>` flag › `BROSKI_THEME` env var (empty/whitespace treated as unset) ›
+`default`. Names are case-insensitive and trimmed.
+
+`auto` queries the terminal's actual background color via an OSC 11 escape sequence and resolves to `dark` or
+`light` accordingly — this happens **before** raw mode is entered, so the query can use cooked stdio. If the
+terminal doesn't answer (no TTY, unsupported terminal), it falls back cleanly to `default`. You can also switch
+themes live mid-session with `/theme <name>` — no restart needed.
+
+```bash
+broski tui ci --theme dark
+broski run ci --tui --theme high-contrast
+BROSKI_THEME=light broski tui ci
+```
+
+## Stats panel
+
+Shown in the launcher's right column in Filter mode (Slash mode shows the command palette instead):
+
+- **Workspace** — workspace path, `broski <version>` plus a best-effort short git rev (`git rev-parse
+  --short HEAD`, silently omitted outside a git repo), and the active theme (`auto → dark` notation when `auto`
+  resolved to something concrete).
+- **Cache** — object count and total size on disk, from `ArtifactStore::stats()`.
+- **Session** — total runs this session, `✓`/`✗`/`⊘` outcome counters, accumulated wall-clock time.
+- **Task detail** (only when a task is highlighted) — description (or `(no description)`), deps, `@in`/`@out`
+  glob counts, and the last successful run's duration + relative age, when history exists.
+- **Recent runs** — the last few completed runs from this session, newest first.
+
+The snapshot refreshes after every run, `/refresh`, and `/cache prune`.
+
+## Related pages
+
+- [Commands and Flags](./commands)
+- [Cache Explainability](../architecture/cache-explain)
+- [Engine Overview](../architecture/engine-overview)

@@ -4,6 +4,8 @@
 **/*.profraw
 **/*.profdata
 test_project/
+/test/
+/broski-test/
 examples/basic/
 examples/showcase/.broski/
 examples/showcase/artifacts/
@@ -19,3 +21,4 @@ website/node_modules/
 website/.docusaurus/
 website/build/
 website/.husky/
+benchmarker/

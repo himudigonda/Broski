@@ -11,7 +11,6 @@ broski-store = { path = "../broski-store" }
 reflink-copy.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 walkdir.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true

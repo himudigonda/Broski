@@ -290,6 +290,16 @@ pub fn parse_broskifile_dsl_with_workspace(
                     }
                     task.env.insert(key.to_string(), value.to_string());
                 } else {
+                    if !is_valid_env_var_name(&entry) {
+                        return Err(parse_error(
+                            line_no,
+                            1,
+                            format!(
+                                "@env entry '{}' is not a valid KEY=value assignment or environment variable name",
+                                entry
+                            ),
+                        ));
+                    }
                     task.env_inherit.push(entry);
                 }
             }
@@ -433,9 +443,9 @@ pub fn parse_broskifile_dsl_with_workspace(
 }
 
 fn split_items(rest: &str, line_no: usize, directive: &str) -> Result<Vec<String>> {
-    let values: Vec<String> = rest
-        .split_whitespace()
-        .map(|value| value.trim_matches('"').trim_matches('\'').to_string())
+    let values: Vec<String> = shell_words::split(rest)
+        .map_err(|_| parse_error(line_no, 1, format!("{} has an unterminated quote", directive)))?
+        .into_iter()
         .filter(|value| !value.is_empty())
         .collect();
 
@@ -444,6 +454,15 @@ fn split_items(rest: &str, line_no: usize, directive: &str) -> Result<Vec<String
     }
 
     Ok(values)
+}
+
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn expand_imports(
@@ -568,7 +587,7 @@ fn parse_version_line(line: &str, line_no: usize) -> Result<Option<String>> {
     }
 
     let raw = right.trim();
-    let value = raw.trim_matches('"');
+    let value = raw.trim_matches('"').trim_matches('\'');
     Ok(Some(value.to_string()))
 }
 
@@ -1440,5 +1459,35 @@ mod tests {
             .expect_err("name collisions should fail");
         let message = error.to_string();
         assert!(message.contains("duplicate task") || message.contains("name collision"));
+    }
+
+    #[test]
+    fn quoted_multi_value_directive_with_spaces_is_a_single_value() {
+        let input = "version = \"0.5\"\nbuild:\n    @in \"path with space.txt\"\n    echo hi\n";
+        let parsed = parse_broskifile_dsl(input).expect("parse DSL");
+        let build = parsed.task.get("build").expect("build task");
+        assert_eq!(build.inputs, vec!["path with space.txt".to_string()]);
+    }
+
+    #[test]
+    fn env_key_value_with_quoted_value_strips_quotes() {
+        let input = "version = \"0.5\"\nbuild:\n    @env GREETING=\"hello world\"\n    echo hi\n";
+        let parsed = parse_broskifile_dsl(input).expect("parse DSL");
+        let build = parsed.task.get("build").expect("build task");
+        assert_eq!(build.env.get("GREETING"), Some(&"hello world".to_string()));
+    }
+
+    #[test]
+    fn env_inherit_rejects_invalid_identifier() {
+        let input = "version = \"0.5\"\nbuild:\n    @env FOO=bar NOT-VALID\n    echo hi\n";
+        let error = parse_broskifile_dsl(input).expect_err("bogus inherited name should fail");
+        assert!(error.to_string().contains("not a valid"));
+    }
+
+    #[test]
+    fn version_accepts_single_quotes() {
+        let input = "version = '0.5'\nbuild:\n    echo hi\n";
+        let parsed = parse_broskifile_dsl(input).expect("parse DSL");
+        assert_eq!(parsed.broski.version, "0.5");
     }
 }

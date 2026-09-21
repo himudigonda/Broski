@@ -52,6 +52,8 @@ pub fn validate_broskifile(config: &BroskiFile, workspace_root: &Path) -> Result
     }
     validate_aliases(config)?;
 
+    let mut declared_outputs: Vec<(std::path::PathBuf, &str)> = Vec::new();
+
     for (task_name, task) in &config.task {
         match task.inferred_mode() {
             TaskMode::Graph if task.outputs.is_empty() => {
@@ -145,6 +147,8 @@ pub fn validate_broskifile(config: &BroskiFile, workspace_root: &Path) -> Result
                     output
                 ));
             }
+
+            declared_outputs.push((normalized, task_name.as_str()));
         }
 
         if let Some(dir) = &task.working_dir {
@@ -170,6 +174,25 @@ pub fn validate_broskifile(config: &BroskiFile, workspace_root: &Path) -> Result
                 "task '{}' has empty @confirm prompt; provide a non-empty message",
                 task_name
             ));
+        }
+    }
+
+    for i in 0..declared_outputs.len() {
+        for j in (i + 1)..declared_outputs.len() {
+            let (path_a, task_a) = &declared_outputs[i];
+            let (path_b, task_b) = &declared_outputs[j];
+            if task_a == task_b {
+                continue;
+            }
+            if path_a == path_b || path_a.starts_with(path_b) || path_b.starts_with(path_a) {
+                return Err(anyhow!(
+                    "tasks '{}' and '{}' declare overlapping outputs ('{}' and '{}'); each output path must be owned by exactly one task",
+                    task_a,
+                    task_b,
+                    path_a.display(),
+                    path_b.display()
+                ));
+            }
         }
     }
 
@@ -326,6 +349,54 @@ mod tests {
 
         let error = validate_broskifile(&config, tmp.path()).expect_err("should fail");
         assert!(error.to_string().contains("overlaps output"));
+    }
+
+    #[test]
+    fn rejects_two_tasks_declaring_the_same_output() {
+        let tmp = tempdir().expect("tempdir");
+
+        let mut task_a = base_task();
+        task_a.outputs = vec!["dist/app".to_string()];
+        let mut task_b = base_task();
+        task_b.outputs = vec!["dist/app".to_string()];
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert("build_a".to_string(), task_a);
+        tasks.insert("build_b".to_string(), task_b);
+
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+
+        let error = validate_broskifile(&config, tmp.path()).expect_err("should fail");
+        assert!(error.to_string().contains("overlapping outputs"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn rejects_two_tasks_with_nested_output_paths() {
+        let tmp = tempdir().expect("tempdir");
+
+        let mut task_a = base_task();
+        task_a.outputs = vec!["dist".to_string()];
+        let mut task_b = base_task();
+        task_b.outputs = vec!["dist/app.txt".to_string()];
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert("build_a".to_string(), task_a);
+        tasks.insert("build_b".to_string(), task_b);
+
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+
+        let error = validate_broskifile(&config, tmp.path()).expect_err("should fail");
+        assert!(error.to_string().contains("overlapping outputs"), "unexpected error: {error}");
     }
 
     fn pkg_two_part() -> (u32, u32) {

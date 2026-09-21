@@ -136,9 +136,9 @@ fn hash_path(path: &Path) -> Result<String> {
         hasher.update(b"dir");
 
         let mut children = Vec::new();
-        for entry in WalkDir::new(path) {
+        for entry in WalkDir::new(path).follow_links(true) {
             let entry = entry.context("walking input directory while hashing")?;
-            if entry.path().is_dir() {
+            if entry.file_type().is_dir() {
                 continue;
             }
             let rel = entry
@@ -151,8 +151,10 @@ fn hash_path(path: &Path) -> Result<String> {
         children.sort_by(|a, b| a.0.cmp(&b.0));
 
         for (rel, child) in children {
-            hasher.update(rel.to_string_lossy().as_bytes());
-            hasher.update(b"\0");
+            let rel_string = rel.to_string_lossy();
+            let rel_bytes = rel_string.as_bytes();
+            hasher.update(&(rel_bytes.len() as u64).to_le_bytes());
+            hasher.update(rel_bytes);
             hash_file_into(&child, &mut hasher)?;
         }
 
@@ -162,7 +164,23 @@ fn hash_path(path: &Path) -> Result<String> {
     Ok(digest_value("missing"))
 }
 
+#[cfg(unix)]
+fn file_mode_bits(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o777
+}
+
+#[cfg(not(unix))]
+fn file_mode_bits(_metadata: &fs::Metadata) -> u32 {
+    0
+}
+
 fn hash_file_into(path: &Path, hasher: &mut blake3::Hasher) -> Result<()> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("reading metadata for '{}'", path.display()))?;
+    hasher.update(&file_mode_bits(&metadata).to_le_bytes());
+    hasher.update(&metadata.len().to_le_bytes());
+
     let mut file = fs::File::open(path)
         .with_context(|| format!("opening file '{}' for hashing", path.display()))?;
     let mut buffer = [0u8; 16 * 1024];
@@ -428,5 +446,61 @@ mod tests {
         .expect("fingerprint b");
 
         assert_ne!(fp_a.manifest.get("secret_env:TOKEN"), fp_b.manifest.get("secret_env:TOKEN"));
+    }
+
+    #[test]
+    fn directory_hash_does_not_collide_across_name_content_boundary() {
+        let dir_a = tempfile::tempdir().expect("tempdir a");
+        fs::write(dir_a.path().join("a"), b"").expect("write a");
+        fs::write(dir_a.path().join("b"), b"x").expect("write b");
+
+        let dir_b = tempfile::tempdir().expect("tempdir b");
+        fs::write(dir_b.path().join("a"), b"b\0x").expect("write a");
+
+        let hash_a = hash_path(dir_a.path()).expect("hash a");
+        let hash_b = hash_path(dir_b.path()).expect("hash b");
+
+        assert_ne!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn directory_hash_changes_when_executable_bit_flips() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let script = temp.path().join("script.sh");
+        fs::write(&script, b"#!/bin/sh\necho hi\n").expect("write script");
+
+        let before = hash_path(temp.path()).expect("hash before");
+
+        let mut perms = fs::metadata(&script).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).expect("chmod");
+
+        let after = hash_path(temp.path()).expect("hash after");
+
+        assert_ne!(before, after);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_hash_follows_symlinked_subdirectories() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real_dir = temp.path().join("real");
+        fs::create_dir_all(&real_dir).expect("create real dir");
+        fs::write(real_dir.join("file.txt"), "v1").expect("write file v1");
+
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).expect("create root");
+        symlink(&real_dir, root.join("linked")).expect("symlink dir");
+
+        let before = hash_path(&root).expect("hash before");
+
+        fs::write(real_dir.join("file.txt"), "v2").expect("write file v2");
+        let after = hash_path(&root).expect("hash after");
+
+        assert_ne!(before, after);
     }
 }

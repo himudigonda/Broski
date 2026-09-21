@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Ignore generated/build/cache folders, binary archives, media assets, and logs.
-# Keep key source files, including website and Rust config/source files.
-IGNORE_PATTERN="(target|cache|dist|node_modules|build|artifacts|\.docusaurus|\.broski|\.git|\.lock|package-lock\.json|\.zip|\.tar|\.gz|\.pyc|\.o|\.a|\.d|\.bin|\.tag|\.log$|\.tmp$|\.map$|\.svg$|\.png$|\.jpg$|\.jpeg$|\.gif$|\.webp$|\.ico$|\.pdf$|\.DS_Store$)"
+# Includes .env.* and .vercel for security hygiene.
+IGNORE_PATTERN="(target|cache|dist|node_modules|test|build|artifacts|\.docusaurus|\.broski|\.git|\.lock|package-lock\.json|\.zip|\.tar|\.gz|\.pyc|\.o|\.a|\.d|\.bin|\.tag|\.log$|\.tmp$|\.map$|\.svg$|\.png$|\.jpg$|\.jpeg$|\.gif$|\.webp$|\.ico$|\.pdf$|\.DS_Store$|\.env.*|\.vercel)"
 
 # Dump contents
 find . -type f | grep -vE "$IGNORE_PATTERN" | sort | while read -r file; do

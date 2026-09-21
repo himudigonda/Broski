@@ -10,43 +10,57 @@ This page is full command reference. It is intentionally dense.
 
 ```bash
 broski --workspace <path> <command>
+broski                                          # no subcommand: prints long help, exits 0
+broski --help | -h
+broski --version | -V
 broski <task> [task-args...] [flags]
 broski run <task> [task-args...] [flags]
 broski list
 broski graph <task> --format text|dot
 broski doctor [--repair|--no-repair]
 broski cache prune --max-size <MB>
-broski tui <task> [--theme <name>]
+broski tui [task] [--theme <name>] [--explain]
 broski history [<task>] [--limit <N>]
 ```
 
 ## Resolution rules
 
-1. Subcommands win over task names.
-2. Use `broski run <task>` when you want explicit task resolution.
-3. Reserved names are blocked as task names: `run`, `list`, `graph`, `doctor`, `cache`, `help`, `version`, `tui`, `history`.
+1. Subcommands win over task names — `run`, `list`, `graph`, `doctor`, `cache`, `tui`, `history` all shadow a
+   task of the same name.
+2. Use `broski run <task>` when you want explicit task resolution (or when your task happens to be named one of
+   the subcommands above).
+3. This isn't a hardcoded blocklist: any string that doesn't match one of `clap`'s declared subcommands falls
+   through to an `external_subcommand` catch-all, which is what makes `broski <task>` work at all. `help` is
+   clap's auto-generated help subcommand; `version` isn't a subcommand at all — it's the global `-V`/`--version`
+   flag — so a task literally named `version` is **not** shadowed the same way `run`/`list`/etc. are.
 
 ## Run behavior flags
 
-These flags apply to `broski <task>` and `broski run <task>`.
+These flags apply to `broski <task>` and `broski run <task>`, **except** `--tui`/`--theme`, which are **not**
+recognized by implicit invocation (`broski <task> --tui` passes `--tui` through as a literal task argument
+instead of launching the dashboard — use `broski run <task> --tui` explicitly).
 
 | Flag | Default | Effect | Notes |
 | --- | --- | --- | --- |
 | `--dry-run` | off | Compute graph and show what would run, without execution. | Useful for CI validation and migration checks. |
-| `--explain` | off | Print cache miss reasons per task. | Reasons are based on manifest deltas (`input`, `env`, `run`, `outputs`, etc.). |
+| `--explain` | off | Print cache miss reasons per task. | See [Cache Explainability](../architecture/cache-explain) for the exact reason strings. |
 | `--force` | off | Bypass cache read and execute tasks. | Explain output shows `cache bypass: --force supplied`. |
 | `--no-cache` | off | Do not read from cache and do not write cache artifacts. | Explain output shows `cache bypass: --no-cache supplied`. |
 | `--watch` | off | Re-run target graph on input changes. | See [Watch Mode](./watch-mode). |
-| `--force-isolation` | off | Force strict isolation for graph tasks. | Not supported for interactive tasks. |
-| `--jobs <n>` | auto | Override worker concurrency. | Explicit run supports `--jobs <n>`. Implicit run supports `--jobs=<n>`. |
-| `--tui` | off | Render this run through the live TUI dashboard instead of the spinner output. | Mutually exclusive with `--dry-run`, `--explain`, and `--watch`. |
+| `--force-isolation` | off | Force strict isolation for graph tasks. | Requires Linux + `bwrap`. Not supported for interactive tasks. |
+| `--jobs <n>` | auto (CPU count) | Override worker concurrency. | Explicit `run` supports space-separated `--jobs <n>`. Implicit invocation requires `--jobs=<n>` (equals form) — the space form is rejected with an actionable error telling you to use `broski run`. |
+| `--tui` | off | Render this run through the live TUI dashboard instead of the spinner output. **`run`-only flag.** | Mutually exclusive with `--dry-run` and `--watch` only. `--explain` **is** supported alongside `--tui` (as of v0.7.0). See [TUI Dashboard](./tui). |
 | `--theme <name>` | `default` | Dashboard color palette (`default`, `dark`, `light`, `high-contrast`/`hc`, `auto`). | Also honored via `BROSKI_THEME`. `auto` queries the terminal background via OSC 11. Only meaningful with `--tui` or `broski tui`. |
 
 ## Global flags
 
 | Flag | Effect |
 | --- | --- |
-| `--workspace <path>` | Resolve `broskifile`, cache state, runtime lock, and paths relative to this workspace root. |
+| `--workspace <path>` | Resolve `broskifile`, cache state, runtime lock, and paths relative to this workspace root. Default `.`. |
+| `-h`, `--help` | Print help (top-level or per-subcommand) and exit 0. |
+| `-V`, `--version` | Print `broski <version>` and exit 0. |
+
+Running `broski` with no subcommand at all prints the full long-help text and exits 0 — it does not error.
 
 Example:
 
@@ -89,9 +103,14 @@ Examples:
 ```bash
 broski run ci --explain
 broski ci --jobs=8
-broski run build api release --force-isolation
+broski run build --force-isolation
 broski test -- --grep slow
 ```
+
+`run` (and implicit invocation) take exactly **one** task name. There is no multi-target form — `broski run
+build api release` does not build three targets; `api` and `release` would be parsed as trailing passthrough
+arguments forwarded to `build`'s own script. To run several targets, either invoke them separately or make one
+orchestration task depend on the others (`ci: lint test build`) and run that.
 
 ### `broski graph <task> --format text|dot`
 
@@ -110,11 +129,18 @@ Check runtime state and lock health under `.broski/runtime`.
 
 | Mode | Behavior |
 | --- | --- |
-| default (`doctor`) | Reports and repairs stale runtime state. |
+| default (`doctor`) | Repair **is on by default** — repair is enabled unless `--no-repair` is passed. Reports and repairs stale runtime state. |
 | `--no-repair` | Report-only mode, no mutation. |
-| `--repair` | Explicit repair mode. |
+| `--repair` | Explicit repair mode (same as default; `--repair --no-repair` together is rejected by the CLI parser). |
 
-When an active lock is live, doctor refuses destructive cleanup.
+`doctor` also probes strict-isolation support: it prints `strict isolation tasks: <n>` when any task declares
+`@isolation strict`, followed by `strict isolation probe: ok` or `strict isolation probe: warning`. On macOS
+specifically, if any task is configured for strict isolation, it prints an explicit warning that strict
+sandboxing is unsupported on that platform (isolation silently falls back to `best_effort` at run time).
+
+When an active runtime lock is live, `doctor` does **not** just skip the destructive part and still report —
+it aborts the whole command with `another Broski execution is active; cannot run doctor sweep while lock is
+live` and exits non-zero.
 
 ### `broski cache prune --max-size <MB>`
 
@@ -131,81 +157,30 @@ Output reports objects pruned, bytes freed, and remaining size.
 
 ### `broski tui [task]` and `broski run <task> --tui`
 
-Render the run through a live `ratatui`-based dashboard:
+Render the run through a live `ratatui`-based dashboard, or (with no task) open an interactive launcher to pick
+one. Full reference — key map, slash commands, themes, stats panel, interactive-task suspend behavior — lives on
+its own page: **[TUI Dashboard →](./tui)**.
 
-- DAG view with per-task state, inline `(cached)` / `(skipped)` / `(dry-run)` / `(failed)` tags, and ETA badges (sourced from the most recent successful execution).
-- Scrollable log tail (mouse wheel + PageUp/Down + Shift-↑/↓ + Shift-Home/End; auto-follows the tail and locks when you scroll up).
-- Summary bar with aggregate remaining-time and overall status.
-- Two-stage Ctrl-C: first press requests a soft cancel; a second press within two seconds escalates to a hard cancel (`SIGTERM` to all child PIDs) and exits.
-- `--explain` is supported: per-task miss reasons land inline on each DAG line and at the top of the selected task's log pane.
-- Interactive tasks (`@mode interactive`) automatically suspend the dashboard, hand the real TTY to the child via `Stdio::inherit`, and resume the dashboard when the child exits.
+Quick summary:
 
-#### Dashboard key map
-
-| Key | Effect |
-| --- | --- |
-| `↑` / `↓` / `j` / `k` | Move selection cursor in the DAG pane. |
-| `Home` / `g` | Jump to first task. |
-| `End` / `G` | Jump to last task. |
-| `PageUp` / `PageDown` | Scroll log pane 10 lines. |
-| `Shift-↑` / `Shift-↓` | Scroll log pane 1 line. |
-| `Shift-Home` / `Shift-End` | Jump log pane to top / tail. |
-| Mouse wheel | Scroll log pane 3 lines per notch. |
-| `x` | **Force-rerun** the selected task only (deps stay cached). Available after run finishes. |
-| `X` | **Force-rerun** the entire original target (`--force` for all tasks). Available after run finishes. |
-| `c` | Clear logs for the selected task. |
-| `r` | Redraw. |
-| `Ctrl-C` | Soft cancel (first press); hard cancel + exit (second press within 2 s). |
-| `q` / `Esc` | Quit without cancelling. |
-
-#### Launcher mode
-
-Run `broski tui` with no task to enter the interactive launcher. Side-by-side layout: tasks on the left, stats / slash-command suggestions on the right.
-
-- Filterable task list (type-ahead substring match, case-insensitive).
-- Free-form input box with a real blinking cursor; `--` in the input forwards trailing tokens as task passthrough args.
-- Tab completes the input from the highlighted task; Esc/Ctrl-U clears.
-- Enter runs the typed target — or the highlighted match if the input is a partial substring — then pops back to the launcher with a status banner.
-- `q` / Ctrl-C exit only when the input is empty.
-
-##### Slash commands
-
-Type `/` in the input box to flip into a command palette. Tab completes to the canonical form, Enter dispatches.
-
-| Command | Effect |
-| --- | --- |
-| `/help` | Show key map + command catalog (alias `/h`, `/?`). |
-| `/theme <name>` | Switch theme live: `default`, `dark`, `light`, `high-contrast`, `auto`. |
-| `/about` | Show broski version (alias `/version`). |
-| `/clear` | Wipe session history and reset counters. |
-| `/refresh` | Reload `broskifile` and refresh stats (alias `/reload`). |
-| `/cache prune <MB>` | Prune the cache to a size budget; report bytes freed. |
-| `/quit` | Exit the launcher (aliases `/q`, `/exit`). |
-
-##### Stats panel
-
-In Filter mode, the right column shows live info in stacked cards:
-
-- **Workspace** — path, version, git rev, theme (with `auto → dark` resolution when applicable).
-- **Cache** — object count and total size.
-- **Session** — total runs · ✓✗⊘ counters · accumulated wall-clock.
-- **Task detail** — when a task is highlighted: description, deps, `@in`/`@out` counts, last successful run.
-- **Recent runs** — last few completed runs.
-
-##### Auto theme
-
-`--theme auto` queries the terminal's background via OSC 11 and picks Dark or Light. Falls back to Default when the terminal doesn't respond.
-
-Theme selection:
+- `broski tui` — launcher: filter tasks, type a target, hit Enter, watch it run, land back in the launcher.
+- `broski tui <task>` — dashboard for one target directly. No `--dry-run`/`--watch` flags exist on this
+  subcommand at all (nothing to be exclusive with).
+- `broski run <task> --tui` — the same dashboard via `run`; mutually exclusive with `--dry-run`/`--watch` on
+  this form specifically, but **not** with `--explain`.
+- One output-formatting asymmetry worth knowing: after the dashboard closes, `broski run <task> --tui` prints
+  the same `cache hits:` / `executed:` / `dry-run:` / explain-reasons summary as a normal `run`, but
+  `broski tui <task>` prints only `cache hits:` / `executed:` — no dry-run line, no explain-reason dump —
+  even if `--explain` was passed. The reasons are still visible live, inside the dashboard's log pane, while
+  it's running.
 
 ```bash
 broski tui                                 # launcher
 broski tui ci --theme dark                 # straight to a target
 broski run ci --tui --theme high-contrast
+broski run ci --tui --explain              # explain IS allowed with --tui
 BROSKI_THEME=light broski tui ci
 ```
-
-The dashboard is mutually exclusive with `--dry-run`, `--explain`, and `--watch` because those flags expect direct stdout output.
 
 ### `broski history [<task>] [--limit <N>]`
 
@@ -221,19 +196,10 @@ broski history ci --limit 10
 
 ## Explain output details
 
-When `--explain` is enabled, reasons are printed per task, for example:
-
-- `cache miss: no prior execution record`
-- `cache miss: input changed: src/lib.rs`
-- `cache miss: env changed: RUSTFLAGS`
-- `cache miss: task command changed`
-- `cache miss: output contract changed`
-- `cache miss: secret env changed`
-- `cache bypass: --force supplied`
-- `cache bypass: --no-cache supplied`
-- `cache bypass: interactive mode`
-
-`@secret_env` values are never printed; reason remains generic.
+When `--explain` is enabled, up to 10 reasons per task are printed (with a `"+N more changes"` overflow line
+beyond that), plus a per-phase timing breakdown. For the exact reason strings and timing format, see
+[Cache Explainability](../architecture/cache-explain). `@secret_env` values are never
+printed; the reason for a secret change always stays generic.
 
 ## Operational patterns
 
@@ -268,8 +234,12 @@ broski dev -- --host 0.0.0.0
 
 - Unknown task: hard failure with task name.
 - Invalid DSL: parse/validation diagnostics include source context.
-- Invalid `--jobs` value: parse failure with actionable message.
+- `--jobs <n>` (space form) on implicit invocation: rejected outright with an actionable message pointing you at
+  `broski run <task> --jobs <n>`. This fires even if `<n>` itself is a valid number — it's a syntax rejection,
+  not a parse-value failure.
+- Invalid `--jobs=<n>` value: parse failure with actionable message.
 - `--force-isolation` on interactive task: rejected.
+- `--force-isolation` on non-Linux, or without `bwrap` on `PATH`: rejected at run start.
 
 ## Make/Just mapping
 
@@ -284,8 +254,10 @@ broski dev -- --host 0.0.0.0
 
 ## Related pages
 
+- [TUI Dashboard](./tui)
 - [Watch Mode](./watch-mode)
 - [Annotations](../dsl/annotations)
+- [Cache Explainability](../architecture/cache-explain)
 - [Migration Playbook](../operations/migration)
 - [Anti-Patterns](../operations/anti-patterns)
 - [Common Mistakes](../operations/common-mistakes)

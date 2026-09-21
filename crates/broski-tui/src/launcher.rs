@@ -235,10 +235,7 @@ impl LauncherState {
         let tail = parts.next().unwrap_or("").trim();
 
         let mut head_tokens = head.split_whitespace();
-        let target = match head_tokens.next() {
-            Some(t) => t.to_string(),
-            None => return None,
-        };
+        let target = head_tokens.next()?.to_string();
 
         let mut passthrough: Vec<String> = head_tokens.map(str::to_string).collect();
         if !tail.is_empty() {
@@ -287,26 +284,44 @@ impl LauncherState {
         }
     }
 
-    /// Clamp `selected` into `0..len` for the active mode after an edit.
-    fn reclamp_selection(&mut self) {
-        let len = self.active_list_len();
-        if len == 0 {
-            self.selected = None;
-        } else {
-            self.selected = Some(self.selected.map_or(0, |i| i.min(len - 1)));
+    fn current_highlighted_identity(&self) -> Option<String> {
+        match self.mode {
+            LauncherMode::Filter => self.highlighted_task().map(str::to_string),
+            LauncherMode::Slash => self.highlighted_slash().map(str::to_string),
         }
     }
 
-    /// Update [`mode`] and reset the cursor based on whether `input`
-    /// currently begins with `/`.
-    fn refresh_mode(&mut self) {
+    fn reclamp_selection(&mut self, previous_identity: Option<&str>) {
+        let len = self.active_list_len();
+        if len == 0 {
+            self.selected = None;
+            return;
+        }
+        if let Some(identity) = previous_identity {
+            let found = match self.mode {
+                LauncherMode::Filter => {
+                    self.filtered_tasks().iter().position(|task| *task == identity)
+                }
+                LauncherMode::Slash => {
+                    self.filtered_slash_commands().iter().position(|label| *label == identity)
+                }
+            };
+            if let Some(idx) = found {
+                self.selected = Some(idx);
+                return;
+            }
+        }
+        self.selected = Some(self.selected.map_or(0, |i| i.min(len - 1)));
+    }
+
+    fn refresh_mode(&mut self, previous_identity: Option<String>) {
         let new_mode =
             if self.input.starts_with('/') { LauncherMode::Slash } else { LauncherMode::Filter };
         if new_mode != self.mode {
             self.mode = new_mode;
             self.selected = if self.active_list_len() == 0 { None } else { Some(0) };
         } else {
-            self.reclamp_selection();
+            self.reclamp_selection(previous_identity.as_deref());
         }
     }
 
@@ -318,21 +333,24 @@ impl LauncherState {
         }
         match action {
             LauncherAction::InsertChar(c) => {
+                let previous = self.current_highlighted_identity();
                 self.input.push(c);
-                self.refresh_mode();
+                self.refresh_mode(previous);
                 LauncherDecision::Continue
             }
             LauncherAction::Backspace => {
+                let previous = self.current_highlighted_identity();
                 self.input.pop();
-                self.refresh_mode();
+                self.refresh_mode(previous);
                 LauncherDecision::Continue
             }
             LauncherAction::ClearInput => {
                 if self.input.is_empty() {
                     LauncherDecision::Continue
                 } else {
+                    let previous = self.current_highlighted_identity();
                     self.input.clear();
-                    self.refresh_mode();
+                    self.refresh_mode(previous);
                     LauncherDecision::Continue
                 }
             }
@@ -372,15 +390,23 @@ impl LauncherState {
             LauncherAction::Complete => match self.mode {
                 LauncherMode::Filter => {
                     if let Some(target) = self.highlighted_task().map(str::to_string) {
-                        self.input = target;
-                        self.refresh_mode();
+                        self.input = target.clone();
+                        self.refresh_mode(Some(target));
                     }
                     LauncherDecision::Continue
                 }
                 LauncherMode::Slash => {
                     if let Some(label) = self.highlighted_slash() {
-                        self.input = canonical_slash_input(label);
-                        self.refresh_mode();
+                        let canonical = canonical_slash_input(label);
+                        let already_has_typed_argument = self
+                            .input
+                            .to_ascii_lowercase()
+                            .starts_with(&canonical.to_ascii_lowercase())
+                            && self.input.trim().len() > canonical.trim().len();
+                        if !already_has_typed_argument {
+                            self.input = canonical;
+                            self.refresh_mode(Some(label.to_string()));
+                        }
                     }
                     LauncherDecision::Continue
                 }
@@ -394,7 +420,7 @@ impl LauncherState {
                     LauncherDecision::Quit
                 } else {
                     self.input.clear();
-                    self.refresh_mode();
+                    self.refresh_mode(None);
                     LauncherDecision::Continue
                 }
             }
@@ -430,18 +456,18 @@ impl LauncherState {
             Ok(SlashCommand::Help) => {
                 self.status = Some(slash_help_text());
                 self.input.clear();
-                self.refresh_mode();
+                self.refresh_mode(None);
                 LauncherDecision::Continue
             }
             Ok(SlashCommand::Theme(theme)) => {
                 self.input.clear();
-                self.refresh_mode();
+                self.refresh_mode(None);
                 LauncherDecision::SwitchTheme(theme)
             }
             Ok(SlashCommand::About) => {
                 self.status = Some(format!("broski {}", env!("CARGO_PKG_VERSION")));
                 self.input.clear();
-                self.refresh_mode();
+                self.refresh_mode(None);
                 LauncherDecision::Continue
             }
             Ok(SlashCommand::Clear) => {
@@ -449,17 +475,17 @@ impl LauncherState {
                 self.stats = SessionStats::default();
                 self.status = Some("cleared session history".to_string());
                 self.input.clear();
-                self.refresh_mode();
+                self.refresh_mode(None);
                 LauncherDecision::Continue
             }
             Ok(SlashCommand::Refresh) => {
                 self.input.clear();
-                self.refresh_mode();
+                self.refresh_mode(None);
                 LauncherDecision::Refresh
             }
             Ok(SlashCommand::PruneCache(mb)) => {
                 self.input.clear();
-                self.refresh_mode();
+                self.refresh_mode(None);
                 LauncherDecision::PruneCache(mb)
             }
             Ok(SlashCommand::Quit) => LauncherDecision::Quit,
@@ -478,8 +504,9 @@ impl LauncherState {
 
     /// Replace the task list (called after `/refresh`).
     pub fn replace_tasks(&mut self, all_tasks: Vec<String>) {
+        let previous = self.current_highlighted_identity();
         self.all_tasks = all_tasks;
-        self.refresh_mode();
+        self.refresh_mode(previous);
     }
 
     /// Record a finished run, then clear the input box so the user can
@@ -509,8 +536,9 @@ impl LauncherState {
         if self.history.len() > 16 {
             self.history.truncate(16);
         }
+        let previous = self.current_highlighted_identity().or(Some(target));
         self.input.clear();
-        self.refresh_mode();
+        self.refresh_mode(previous);
     }
 }
 
@@ -673,6 +701,21 @@ mod tests {
         l.apply(LauncherAction::InsertChar('f')); // now only "fmt"
         assert_eq!(l.filtered_tasks(), vec!["fmt"]);
         assert_eq!(l.selected, Some(0));
+    }
+
+    #[test]
+    fn selection_follows_highlighted_task_identity_when_an_earlier_match_drops_out() {
+        let mut l = LauncherState::new(s(&["zremoved", "target", "keeptwo"]));
+        l.apply(LauncherAction::Down);
+        assert_eq!(l.highlighted_task(), Some("target"));
+
+        l.apply(LauncherAction::InsertChar('t'));
+        assert_eq!(l.filtered_tasks(), vec!["target", "keeptwo"]);
+        assert_eq!(
+            l.highlighted_task(),
+            Some("target"),
+            "cursor must follow 'target' by identity, not silently land on 'keeptwo' at the old index"
+        );
     }
 
     #[test]
@@ -1032,6 +1075,36 @@ mod tests {
         }
         l2.apply(LauncherAction::Complete);
         assert_eq!(l2.input, "/cache prune ");
+    }
+
+    #[test]
+    fn tab_after_fully_typed_argument_does_not_discard_it() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/theme dark".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.input, "/theme dark");
+
+        l.apply(LauncherAction::Complete);
+        assert_eq!(
+            l.input, "/theme dark",
+            "tab-completion must not overwrite an already-typed argument"
+        );
+    }
+
+    #[test]
+    fn tab_after_fully_typed_cache_prune_argument_does_not_discard_it() {
+        let mut l = LauncherState::new(s(&["fmt"]));
+        for c in "/cache prune 100".chars() {
+            l.apply(LauncherAction::InsertChar(c));
+        }
+        assert_eq!(l.input, "/cache prune 100");
+
+        l.apply(LauncherAction::Complete);
+        assert_eq!(
+            l.input, "/cache prune 100",
+            "tab-completion must not overwrite an already-typed MB value"
+        );
     }
 
     #[test]

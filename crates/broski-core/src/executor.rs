@@ -227,6 +227,12 @@ impl Executor {
         }
 
         let resolved_target = self.config.resolve_task_name(target)?;
+        if self.config.task.get(&resolved_target).is_some_and(|task| task.private) {
+            return Err(anyhow!(
+                "task '{}' is @private and can only run as a dependency of another task",
+                resolved_target
+            ));
+        }
         let layers = self.graph.layers_for_target(&resolved_target)?;
         self.preflight_requires(&layers)?;
 
@@ -746,6 +752,7 @@ impl Executor {
                 &passthrough_args,
                 options,
                 progress.as_ref(),
+                redactor.as_ref(),
             )
             .with_context(|| format!("executing task '{}'", task_name))?;
         let elapsed_command = started_command.elapsed();
@@ -893,6 +900,7 @@ impl Executor {
         passthrough_args: &[String],
         options: &RunOptions,
         progress: Option<&Sender<ProgressEvent>>,
+        redactor: Option<&SecretRedactor>,
     ) -> Result<Output> {
         let isolation_mode = selected_isolation(task, options);
         let invocation = prepare_task_invocation(stage_workspace, task, passthrough_args)?;
@@ -943,9 +951,21 @@ impl Executor {
 
         let capture = options.capture_output && options.event_sink.is_some();
         if !capture {
-            return command.output().with_context(|| {
+            command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            let child = command.spawn().with_context(|| {
                 format!("spawning task command '{}'", invocation.display_command)
+            })?;
+            let pid = child.id();
+            if let Some(token) = &options.cancellation {
+                token.register_child(pid);
+            }
+            let output = child.wait_with_output().with_context(|| {
+                format!("waiting on task command '{}'", invocation.display_command)
             });
+            if let Some(token) = &options.cancellation {
+                token.unregister_child(pid);
+            }
+            return output;
         }
 
         // Capture mode: pipe stdout/stderr line-by-line so LogLine events can stream
@@ -969,10 +989,20 @@ impl Executor {
             .stderr
             .take()
             .ok_or_else(|| anyhow!("captured stderr was not opened for task '{}'", task_name))?;
-        let stdout_handle =
-            spawn_log_capture(stdout, task_name.to_string(), LogStream::Stdout, sender.clone());
-        let stderr_handle =
-            spawn_log_capture(stderr, task_name.to_string(), LogStream::Stderr, sender);
+        let stdout_handle = spawn_log_capture(
+            stdout,
+            task_name.to_string(),
+            LogStream::Stdout,
+            sender.clone(),
+            redactor.cloned(),
+        );
+        let stderr_handle = spawn_log_capture(
+            stderr,
+            task_name.to_string(),
+            LogStream::Stderr,
+            sender,
+            redactor.cloned(),
+        );
         let status = child
             .wait()
             .with_context(|| format!("waiting on task command '{}'", invocation.display_command))?;
@@ -1208,33 +1238,43 @@ impl Executor {
 
         let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-        for output in outputs {
-            let destination = self.workspace_root.join(output);
-            let staged = stage_workspace.join(output);
+        let backup_result: Result<()> = (|| {
+            for output in outputs {
+                let destination = self.workspace_root.join(output);
+                let staged = stage_workspace.join(output);
 
-            if !staged.exists() {
-                return Err(anyhow!(
-                    "declared output '{}' was not produced in staged execution",
-                    output.display()
-                ));
-            }
-
-            if destination.exists() {
-                let backup_path = tx.path().join(output);
-                if let Some(parent) = backup_path.parent() {
-                    fs::create_dir_all(parent).with_context(|| {
-                        format!("creating backup parent '{}'", parent.display())
-                    })?;
+                if !staged.exists() {
+                    return Err(anyhow!(
+                        "declared output '{}' was not produced in staged execution",
+                        output.display()
+                    ));
                 }
-                fs::rename(&destination, &backup_path).with_context(|| {
-                    format!(
-                        "moving existing output '{}' to backup '{}'",
-                        destination.display(),
-                        backup_path.display()
-                    )
+                reject_symlinks_in_tree(&staged).with_context(|| {
+                    format!("validating declared output '{}' before promotion", output.display())
                 })?;
-                backups.push((destination.clone(), backup_path));
+
+                if destination.exists() {
+                    let backup_path = tx.path().join(output);
+                    if let Some(parent) = backup_path.parent() {
+                        fs::create_dir_all(parent).with_context(|| {
+                            format!("creating backup parent '{}'", parent.display())
+                        })?;
+                    }
+                    fs::rename(&destination, &backup_path).with_context(|| {
+                        format!(
+                            "moving existing output '{}' to backup '{}'",
+                            destination.display(),
+                            backup_path.display()
+                        )
+                    })?;
+                    backups.push((destination.clone(), backup_path));
+                }
             }
+            Ok(())
+        })();
+
+        if let Err(error) = backup_result {
+            return Err(restore_backups_or_preserve(tx, &backups, error));
         }
 
         let mut promoted: Vec<PathBuf> = Vec::new();
@@ -1266,19 +1306,41 @@ impl Executor {
             for destination in &promoted {
                 let _ = remove_path_if_exists(destination);
             }
-            for (destination, backup) in backups.iter().rev() {
-                if backup.exists() {
-                    if let Some(parent) = destination.parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    let _ = fs::rename(backup, destination);
-                }
-            }
-            return Err(error);
+            return Err(restore_backups_or_preserve(tx, &backups, error));
         }
 
         Ok(())
     }
+}
+
+// On restore failure, `tx` is kept on disk instead of dropped, since dropping
+// it would delete the only remaining copy of the user's prior output.
+fn restore_backups_or_preserve(
+    tx: TempDir,
+    backups: &[(PathBuf, PathBuf)],
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let mut restore_failed = false;
+    for (destination, backup) in backups.iter().rev() {
+        if backup.exists() {
+            if let Some(parent) = destination.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if fs::rename(backup, destination).is_err() {
+                restore_failed = true;
+            }
+        }
+    }
+
+    if restore_failed {
+        let preserved_at = tx.keep();
+        return error.context(format!(
+            "failed to fully restore pre-existing outputs; originals preserved at '{}'",
+            preserved_at.display()
+        ));
+    }
+
+    error
 }
 
 fn emit_progress(sender: &Option<Sender<ProgressEvent>>, event: ProgressEvent) {
@@ -1304,6 +1366,7 @@ fn spawn_log_capture<R>(
     task: String,
     stream: LogStream,
     sender: Sender<ProgressEvent>,
+    redactor: Option<SecretRedactor>,
 ) -> thread::JoinHandle<Result<Vec<u8>>>
 where
     R: io::Read + Send + 'static,
@@ -1322,8 +1385,12 @@ where
             }
             buf.extend_from_slice(line.as_bytes());
             let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
+            let visible = match &redactor {
+                Some(redactor) => redactor.redact_text(&trimmed),
+                None => trimmed,
+            };
             let _ =
-                sender.send(ProgressEvent::LogLine { task: task.clone(), stream, line: trimmed });
+                sender.send(ProgressEvent::LogLine { task: task.clone(), stream, line: visible });
         }
         Ok(buf)
     })
@@ -1451,7 +1518,7 @@ impl SecretRedactor {
         for key in secret_env_keys {
             if let Some(value) = resolved_env.get(key) {
                 let trimmed = value.trim();
-                if trimmed.len() >= 6 {
+                if !trimmed.is_empty() {
                     patterns.push(trimmed.to_string());
                 }
             }
@@ -1924,6 +1991,30 @@ fn should_include(entry: &DirEntry, source_root: &Path) -> bool {
     )
 }
 
+fn reject_symlinks_in_tree(root: &Path) -> Result<()> {
+    let root_meta = fs::symlink_metadata(root)
+        .with_context(|| format!("reading metadata for '{}'", root.display()))?;
+    if root_meta.file_type().is_symlink() {
+        return Err(anyhow!(
+            "path '{}' is a symlink; symlinked outputs are not permitted",
+            root.display()
+        ));
+    }
+    if root_meta.is_dir() {
+        for entry in WalkDir::new(root) {
+            let entry = entry.context("walking output tree for symlink check")?;
+            if entry.path_is_symlink() {
+                return Err(anyhow!(
+                    "path '{}' contains a symlink at '{}'; symlinked outputs are not permitted",
+                    root.display(),
+                    entry.path().display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
     if src.is_file() {
         if let Some(parent) = dest.parent() {
@@ -2316,6 +2407,114 @@ mod tests {
         assert_eq!(content.trim(), "stable");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn promote_outputs_restores_backups_when_backup_loop_fails_partway() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::write(workspace.join("src/input.txt"), "hello").expect("write input");
+
+        fs::create_dir_all(workspace.join("a")).expect("create a");
+        fs::write(workspace.join("a/out.txt"), "old-a").expect("write old a");
+        fs::create_dir_all(workspace.join("b")).expect("create b");
+        fs::write(workspace.join("b/out.txt"), "old-b").expect("write old b");
+
+        let mut task =
+            simple_task("mkdir -p a b && echo new-a > a/out.txt && echo new-b > b/out.txt");
+        task.outputs = vec!["a/out.txt".to_string(), "b/out.txt".to_string()];
+        let mut tasks = BTreeMap::new();
+        tasks.insert("phase_task".to_string(), task);
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let b_dir = workspace.join("b");
+        let mut perms = fs::metadata(&b_dir).expect("meta").permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(&b_dir, perms).expect("chmod b read-only");
+
+        let result = executor.run_target("phase_task", &RunOptions::default());
+
+        let mut perms = fs::metadata(&b_dir).expect("meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&b_dir, perms).expect("restore b perms");
+
+        assert!(result.is_err(), "promotion should fail when backing up b/out.txt fails");
+
+        let a_content = fs::read_to_string(workspace.join("a/out.txt")).expect("read a");
+        assert_eq!(a_content.trim(), "old-a", "a/out.txt backup should have been restored");
+        let b_content = fs::read_to_string(workspace.join("b/out.txt")).expect("read b");
+        assert_eq!(b_content.trim(), "old-b", "b/out.txt should be untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promote_outputs_rejects_symlinked_output() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::write(workspace.join("src/input.txt"), "hello").expect("write input");
+
+        let secret = tmp.path().join("secret.txt");
+        fs::write(&secret, "top secret host content").expect("write secret");
+
+        let cmd = format!("mkdir -p dist && ln -s {} dist/output.txt", secret.display());
+        let mut tasks = BTreeMap::new();
+        tasks.insert("phase_task".to_string(), simple_task(&cmd));
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let error = executor
+            .run_target("phase_task", &RunOptions::default())
+            .expect_err("symlinked output should be rejected");
+        let full = format!("{error:#}");
+        assert!(full.contains("symlink"), "unexpected error: {full}");
+        assert!(!workspace.join("dist/output.txt").exists());
+    }
+
+    #[test]
+    fn non_capture_run_registers_child_pid_for_hard_cancel() {
+        let (_tmp, config, workspace) =
+            build_graph_workspace("sleep 0.3 && mkdir -p dist && echo ok > dist/output.txt");
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor =
+            Arc::new(Executor::new(&workspace, config, Arc::new(cache)).expect("executor"));
+
+        let token = CancellationToken::new();
+        let opts = RunOptions { cancellation: Some(token.clone()), ..RunOptions::default() };
+
+        let exec_clone = Arc::clone(&executor);
+        let handle = thread::spawn(move || exec_clone.run_target("phase_task", &opts));
+
+        let mut saw_registration = false;
+        for _ in 0..50 {
+            if !token.registered_children().is_empty() {
+                saw_registration = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(saw_registration, "expected child pid to be registered during a non-capture run");
+
+        handle.join().expect("thread join").expect("run ok");
+    }
+
     #[test]
     fn multiline_task_fails_fast_on_intermediate_command_failure() {
         // Common task bodies look like:
@@ -2507,24 +2706,24 @@ mod tests {
     }
 
     #[test]
-    fn redactor_ignores_short_values() {
+    fn redactor_redacts_short_values_too() {
         let redactor = SecretRedactor::from_env(
             &BTreeMap::from([
-                ("TOO_SHORT".to_string(), "1".to_string()),
+                ("SHORT_PIN".to_string(), "42".to_string()),
                 ("TOKEN".to_string(), "supersecret".to_string()),
             ]),
-            &BTreeSet::from(["TOO_SHORT".to_string(), "TOKEN".to_string()]),
+            &BTreeSet::from(["SHORT_PIN".to_string(), "TOKEN".to_string()]),
         )
         .expect("redactor");
 
         let output = Output {
             status: success_exit_status(),
-            stdout: b"value=1 token=supersecret".to_vec(),
+            stdout: b"pin=42 token=supersecret".to_vec(),
             stderr: Vec::new(),
         };
         let redacted = redact_output(output, Some(&redactor));
         let stdout = String::from_utf8_lossy(&redacted.stdout);
-        assert!(stdout.contains("value=1"));
+        assert!(!stdout.contains("pin=42"), "short secret should be redacted: {stdout}");
         assert!(!stdout.contains("supersecret"));
         assert!(stdout.contains("token=[REDACTED]"));
     }
@@ -2890,6 +3089,42 @@ mod tests {
     }
 
     #[test]
+    fn run_target_rejects_direct_invocation_of_private_task() {
+        let (_tmp, mut config, workspace) =
+            build_graph_workspace("mkdir -p dist && echo ok > dist/output.txt");
+        config.task.get_mut("phase_task").expect("phase_task").private = true;
+
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let error = executor
+            .run_target("phase_task", &RunOptions::default())
+            .expect_err("private task should not run directly");
+        assert!(error.to_string().contains("@private"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn run_target_allows_private_task_as_a_dependency() {
+        let (_tmp, mut config, workspace) =
+            build_graph_workspace("mkdir -p dist && echo ok > dist/output.txt");
+        config.task.get_mut("phase_task").expect("phase_task").private = true;
+
+        let mut public_task = simple_task("mkdir -p dist2 && echo ok2 > dist2/output.txt");
+        public_task.deps = vec!["phase_task".to_string()];
+        public_task.outputs = vec!["dist2/output.txt".to_string()];
+        config.task.insert("public_task".to_string(), public_task);
+
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let summary = executor
+            .run_target("public_task", &RunOptions::default())
+            .expect("public task with a private dependency should run");
+        assert!(summary.executed.contains(&"phase_task".to_string()));
+        assert!(summary.executed.contains(&"public_task".to_string()));
+    }
+
+    #[test]
     fn streaming_emits_phase_events_for_graph_task() {
         let (_tmp, config, workspace) =
             build_graph_workspace("mkdir -p dist && echo ok > dist/output.txt");
@@ -3010,6 +3245,56 @@ mod tests {
         });
         assert!(saw_stdout, "stdout MARKER_STDOUT not seen as LogLine event");
         assert!(saw_stderr, "stderr SIDE_STDERR not seen as LogLine event");
+    }
+
+    #[test]
+    fn streaming_capture_output_redacts_secret_env_in_loglines() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("src");
+        fs::write(workspace.join("src/input.txt"), "hello").expect("write input");
+
+        fs::write(workspace.join(".env"), "API_TOKEN=topsecretvalue\n").expect("write .env");
+
+        let mut task =
+            simple_task("mkdir -p dist && echo token=$API_TOKEN && echo ok > dist/output.txt");
+        task.secret_env.push("API_TOKEN".to_string());
+
+        let mut tasks = BTreeMap::new();
+        tasks.insert("phase_task".to_string(), task);
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: vec![".env".to_string()],
+        };
+
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let (tx, rx) = mpsc::channel::<ProgressEvent>();
+        let opts =
+            RunOptions { event_sink: Some(tx), capture_output: true, ..RunOptions::default() };
+        executor.run_target("phase_task", &opts).expect("run ok");
+        drop(opts);
+
+        let events = collect_events(rx);
+        let log_lines: Vec<String> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                ProgressEvent::LogLine { line, .. } => Some(line.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            log_lines.iter().any(|line| line.contains("[REDACTED]")),
+            "expected a redacted live log line, got: {log_lines:?}"
+        );
+        assert!(
+            !log_lines.iter().any(|line| line.contains("topsecretvalue")),
+            "secret leaked into a live LogLine event: {log_lines:?}"
+        );
     }
 
     #[test]

@@ -4,10 +4,57 @@ sidebar_position: 1
 
 # Security
 
-Key controls:
+## Secret handling
 
-- `@secret_env` redacts secret values from live output and persisted logs
-- explain output avoids leaking secret values
-- runtime health and orphan lock recovery via `broski doctor`
+- `@secret_env KEY` marks an env key as sensitive **and** inherits it (from `.env` via `@load`, then the host
+  environment) — no separate `@env KEY` is needed alongside it.
+- Values are redacted from captured stdout/stderr via an Aho-Corasick scan, replaced with `[REDACTED]`. **Only
+  values 6 characters or longer are matched** — very short secrets are not guaranteed to be redacted.
+- Fingerprinting never stores or diffs secret values in plaintext: secret manifest entries use a **keyed BLAKE3**
+  digest, keyed by a workspace-local salt generated once and persisted at `.broski/config/salt` (file mode
+  `0600`).
+- `--explain` output for a secret change stays fully generic: `cache miss: secret env changed` — no key name, no
+  value.
 
-Recommendation: keep secrets out of committed task files and inject from environment/runtime secret stores.
+See [Annotations → `@secret_env`](../dsl/annotations) for the full DSL-level reference.
+
+## Sandboxing (`@isolation`)
+
+- `strict` runs the task inside a [`bwrap`](https://github.com/containers/bubblewrap) sandbox: network
+  namespace unshared, filesystem restricted to a minimal ro-bind set, `$HOME` tmpfs-masked. **Linux-only** —
+  requires `bwrap` on `PATH`; other platforms error rather than silently degrading.
+- `best_effort` and `strict` both clear the process environment down to `PATH, HOME, USER, TMPDIR, SHELL, TERM`
+  before layering the task's own `@env`/`@secret_env` on top. `off` inherits the full parent environment
+  unchanged — treat `off` as "no protection," not just "no sandbox."
+- Default when `@isolation` is omitted: `strict` on Linux, `best_effort` everywhere else.
+- `--force-isolation` forces `strict` for every graph task in a run; it's rejected for interactive tasks and
+  requires Linux + `bwrap`.
+
+## Shell execution
+
+- Windows tasks execute via PowerShell script files (`pwsh` preferred, `powershell` fallback) — there is no
+  `cmd.exe` fallback, closing a command-injection surface that existed in earlier versions.
+- Task scripts run with `set -e` injected ahead of the body by default (as of `v0.7.1`), so a failing command
+  mid-script fails the task instead of silently continuing to a usually-successful final line. Tasks using a
+  TOML-only `@shell`/`shell_override` are exempt and own their own failure semantics.
+
+## Runtime and cache integrity
+
+- `broski doctor` reports and (by default) repairs stale runtime state under `.broski/runtime`. Runtime lock
+  checks include Linux process-start identity (`/proc/<pid>/stat` start ticks) to reduce false active-lock
+  blocks from PID reuse.
+- Cache restore validates artifact relative paths and object hashes before writing anything into the workspace.
+- Dynamic top-level variable commands (`KEY = $(...)`) run with a stripped environment, a 5-second timeout, and
+  a 1 MiB combined stdout/stderr cap — see [Annotations](../dsl/annotations) for full semantics.
+
+## Recommendation
+
+Keep secrets out of committed task files and inject them from the environment or a runtime secret store via
+`@secret_env`. For the full technical write-up behind the `v0.5.2` hardening pass, see the
+[v0.5.2 Security Hardening Report](https://github.com/himudigonda/Broski/blob/main/docs/reports/v0.5.2-security-hardening.md).
+
+## Related pages
+
+- [Annotations](../dsl/annotations)
+- [Engine Overview](../architecture/engine-overview)
+- [Cache Explainability](../architecture/cache-explain)

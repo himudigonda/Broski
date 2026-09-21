@@ -11,6 +11,7 @@ const sidebars: SidebarsConfig = {
         'quickstart/install',
         'quickstart/first-broskifile',
         'quickstart/make-just-broski',
+        'quickstart/examples',
       ],
     },
     {
@@ -35,6 +36,7 @@ const sidebars: SidebarsConfig = {
       label: 'CLI + Operations',
       items: [
         'cli/commands',
+        'cli/tui',
         'cli/watch-mode',
         'operations/security',
         'operations/migration',
@@ -48,7 +50,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Release Notes',
-      items: ['releases/v0.5'],
+      items: ['releases/v0.7', 'releases/v0.6', 'releases/v0.5'],
     },
   ],
 };

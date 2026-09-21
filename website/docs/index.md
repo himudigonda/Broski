@@ -18,12 +18,13 @@ slug: /
 1. [Install Broski](quickstart/install)
 2. [30-second quickstart](quickstart/thirty-second-quickstart)
 3. [Write your first broskifile](quickstart/first-broskifile)
-4. [Make vs Just vs Broski](quickstart/make-just-broski)
-5. [Migration playbook](operations/migration)
+4. [Runnable examples](quickstart/examples)
+5. [Make vs Just vs Broski](quickstart/make-just-broski)
+6. [Migration playbook](operations/migration)
 
 ## Current Versioning
 
-- **Current:** `v0.7.1`
+- **Current:** `v0.7.1` — see [Release Notes](releases)
 
 ## Learn More (after quickstart)
 
@@ -31,5 +32,6 @@ slug: /
 - [Execution model](architecture/engine-overview)
 - [DSL Reference](dsl/overview)
 - [Command Reference](cli/commands)
+- [TUI Dashboard](cli/tui)
 - [Security and redaction](operations/security)
 - [Release runbook](operations/release-runbook)
