@@ -1232,36 +1232,43 @@ impl Executor {
 
         let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-        for output in outputs {
-            let destination = self.workspace_root.join(output);
-            let staged = stage_workspace.join(output);
+        let backup_result: Result<()> = (|| {
+            for output in outputs {
+                let destination = self.workspace_root.join(output);
+                let staged = stage_workspace.join(output);
 
-            if !staged.exists() {
-                return Err(anyhow!(
-                    "declared output '{}' was not produced in staged execution",
-                    output.display()
-                ));
-            }
-            reject_symlinks_in_tree(&staged).with_context(|| {
-                format!("validating declared output '{}' before promotion", output.display())
-            })?;
-
-            if destination.exists() {
-                let backup_path = tx.path().join(output);
-                if let Some(parent) = backup_path.parent() {
-                    fs::create_dir_all(parent).with_context(|| {
-                        format!("creating backup parent '{}'", parent.display())
-                    })?;
+                if !staged.exists() {
+                    return Err(anyhow!(
+                        "declared output '{}' was not produced in staged execution",
+                        output.display()
+                    ));
                 }
-                fs::rename(&destination, &backup_path).with_context(|| {
-                    format!(
-                        "moving existing output '{}' to backup '{}'",
-                        destination.display(),
-                        backup_path.display()
-                    )
+                reject_symlinks_in_tree(&staged).with_context(|| {
+                    format!("validating declared output '{}' before promotion", output.display())
                 })?;
-                backups.push((destination.clone(), backup_path));
+
+                if destination.exists() {
+                    let backup_path = tx.path().join(output);
+                    if let Some(parent) = backup_path.parent() {
+                        fs::create_dir_all(parent).with_context(|| {
+                            format!("creating backup parent '{}'", parent.display())
+                        })?;
+                    }
+                    fs::rename(&destination, &backup_path).with_context(|| {
+                        format!(
+                            "moving existing output '{}' to backup '{}'",
+                            destination.display(),
+                            backup_path.display()
+                        )
+                    })?;
+                    backups.push((destination.clone(), backup_path));
+                }
             }
+            Ok(())
+        })();
+
+        if let Err(error) = backup_result {
+            return Err(restore_backups_or_preserve(tx, &backups, error));
         }
 
         let mut promoted: Vec<PathBuf> = Vec::new();
@@ -1293,19 +1300,41 @@ impl Executor {
             for destination in &promoted {
                 let _ = remove_path_if_exists(destination);
             }
-            for (destination, backup) in backups.iter().rev() {
-                if backup.exists() {
-                    if let Some(parent) = destination.parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    let _ = fs::rename(backup, destination);
-                }
-            }
-            return Err(error);
+            return Err(restore_backups_or_preserve(tx, &backups, error));
         }
 
         Ok(())
     }
+}
+
+// On restore failure, `tx` is kept on disk instead of dropped, since dropping
+// it would delete the only remaining copy of the user's prior output.
+fn restore_backups_or_preserve(
+    tx: TempDir,
+    backups: &[(PathBuf, PathBuf)],
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let mut restore_failed = false;
+    for (destination, backup) in backups.iter().rev() {
+        if backup.exists() {
+            if let Some(parent) = destination.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if fs::rename(backup, destination).is_err() {
+                restore_failed = true;
+            }
+        }
+    }
+
+    if restore_failed {
+        let preserved_at = tx.keep();
+        return error.context(format!(
+            "failed to fully restore pre-existing outputs; originals preserved at '{}'",
+            preserved_at.display()
+        ));
+    }
+
+    error
 }
 
 fn emit_progress(sender: &Option<Sender<ProgressEvent>>, event: ProgressEvent) {
@@ -2370,6 +2399,55 @@ mod tests {
         let content =
             fs::read_to_string(workspace.join("dist/output.txt")).expect("read old output");
         assert_eq!(content.trim(), "stable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promote_outputs_restores_backups_when_backup_loop_fails_partway() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create src");
+        fs::write(workspace.join("src/input.txt"), "hello").expect("write input");
+
+        fs::create_dir_all(workspace.join("a")).expect("create a");
+        fs::write(workspace.join("a/out.txt"), "old-a").expect("write old a");
+        fs::create_dir_all(workspace.join("b")).expect("create b");
+        fs::write(workspace.join("b/out.txt"), "old-b").expect("write old b");
+
+        let mut task =
+            simple_task("mkdir -p a b && echo new-a > a/out.txt && echo new-b > b/out.txt");
+        task.outputs = vec!["a/out.txt".to_string(), "b/out.txt".to_string()];
+        let mut tasks = BTreeMap::new();
+        tasks.insert("phase_task".to_string(), task);
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".to_string() },
+            task: tasks,
+            alias: BTreeMap::new(),
+            load_env: Vec::new(),
+        };
+
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let b_dir = workspace.join("b");
+        let mut perms = fs::metadata(&b_dir).expect("meta").permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(&b_dir, perms).expect("chmod b read-only");
+
+        let result = executor.run_target("phase_task", &RunOptions::default());
+
+        let mut perms = fs::metadata(&b_dir).expect("meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&b_dir, perms).expect("restore b perms");
+
+        assert!(result.is_err(), "promotion should fail when backing up b/out.txt fails");
+
+        let a_content = fs::read_to_string(workspace.join("a/out.txt")).expect("read a");
+        assert_eq!(a_content.trim(), "old-a", "a/out.txt backup should have been restored");
+        let b_content = fs::read_to_string(workspace.join("b/out.txt")).expect("read b");
+        assert_eq!(b_content.trim(), "old-b", "b/out.txt should be untouched");
     }
 
     #[cfg(unix)]
