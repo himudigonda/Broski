@@ -227,6 +227,12 @@ impl Executor {
         }
 
         let resolved_target = self.config.resolve_task_name(target)?;
+        if self.config.task.get(&resolved_target).is_some_and(|task| task.private) {
+            return Err(anyhow!(
+                "task '{}' is @private and can only run as a dependency of another task",
+                resolved_target
+            ));
+        }
         let layers = self.graph.layers_for_target(&resolved_target)?;
         self.preflight_requires(&layers)?;
 
@@ -3080,6 +3086,42 @@ mod tests {
             load_env: Vec::new(),
         };
         (tmp, config, workspace)
+    }
+
+    #[test]
+    fn run_target_rejects_direct_invocation_of_private_task() {
+        let (_tmp, mut config, workspace) =
+            build_graph_workspace("mkdir -p dist && echo ok > dist/output.txt");
+        config.task.get_mut("phase_task").expect("phase_task").private = true;
+
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let error = executor
+            .run_target("phase_task", &RunOptions::default())
+            .expect_err("private task should not run directly");
+        assert!(error.to_string().contains("@private"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn run_target_allows_private_task_as_a_dependency() {
+        let (_tmp, mut config, workspace) =
+            build_graph_workspace("mkdir -p dist && echo ok > dist/output.txt");
+        config.task.get_mut("phase_task").expect("phase_task").private = true;
+
+        let mut public_task = simple_task("mkdir -p dist2 && echo ok2 > dist2/output.txt");
+        public_task.deps = vec!["phase_task".to_string()];
+        public_task.outputs = vec!["dist2/output.txt".to_string()];
+        config.task.insert("public_task".to_string(), public_task);
+
+        let cache = LocalArtifactStore::new(workspace.join(".broski/cache")).expect("cache");
+        let executor = Executor::new(&workspace, config, Arc::new(cache)).expect("executor");
+
+        let summary = executor
+            .run_target("public_task", &RunOptions::default())
+            .expect("public task with a private dependency should run");
+        assert!(summary.executed.contains(&"phase_task".to_string()));
+        assert!(summary.executed.contains(&"public_task".to_string()));
     }
 
     #[test]
