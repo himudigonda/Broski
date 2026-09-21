@@ -92,6 +92,7 @@ pub fn run(
     base_options: RunOptions,
     theme: Theme,
 ) -> Result<RunSummary> {
+    install_terminal_restore_panic_hook();
     let mut terminal = enter_terminal().context("entering alt screen / raw mode")?;
     let palette = theme.palette();
     let result = run_target_in_terminal(
@@ -118,6 +119,7 @@ pub fn run_launcher(
     base_options: RunOptions,
     theme: Theme,
 ) -> Result<()> {
+    install_terminal_restore_panic_hook();
     let mut terminal = enter_terminal().context("entering alt screen / raw mode")?;
     let result = drive_launcher(&mut terminal, &workspace, &config, &store, &base_options, theme);
     let _ = leave_terminal(&mut terminal);
@@ -811,6 +813,16 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(
     let _ = execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen);
     let _ = terminal.show_cursor();
     Ok(())
+}
+
+// Release builds set panic = "abort", where a Drop guard's destructor never runs; a panic hook does.
+fn install_terminal_restore_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+        default_hook(info);
+    }));
 }
 
 #[cfg(test)]
