@@ -498,10 +498,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     Ok(())
 }
 
-/// Resolve the target's full task graph and report whether any
-/// transitively-required task runs in [`TaskMode::Interactive`].
-/// Best-effort: when graph resolution fails we conservatively return
-/// `false` and let the dashboard try its luck.
+// @confirm also needs a suspended terminal: its read_line() expects \n from
+// Enter, and raw mode delivers \r instead, so it would never return.
 fn target_has_interactive_task(config: &BroskiFile, target: &str) -> bool {
     let resolved = match config.resolve_task_name(target) {
         Ok(name) => name,
@@ -519,7 +517,7 @@ fn target_has_interactive_task(config: &BroskiFile, target: &str) -> bool {
         config
             .task
             .get(name)
-            .map(|spec| spec.inferred_mode() == TaskMode::Interactive)
+            .map(|spec| spec.inferred_mode() == TaskMode::Interactive || spec.confirm.is_some())
             .unwrap_or(false)
     })
 }
@@ -1188,6 +1186,46 @@ mod tests {
             load_env: vec![],
         };
         assert!(target_has_interactive_task(&config, "dev"));
+    }
+
+    #[test]
+    fn target_with_confirm_on_a_graph_task_needs_a_suspended_terminal() {
+        use broski_core::model::{BroskiSection, RunSpec, TaskSpec};
+        let mut tasks = std::collections::BTreeMap::new();
+        tasks.insert(
+            "release".to_string(),
+            TaskSpec {
+                deps: vec![],
+                description: None,
+                resolved_variables: Default::default(),
+                inputs: vec![],
+                stage_ro: vec![],
+                outputs: vec!["dist/out".into()],
+                env: Default::default(),
+                env_inherit: vec![],
+                secret_env: vec![],
+                run: RunSpec::Shell("echo releasing".into()),
+                isolation: None,
+                mode: None,
+                working_dir: None,
+                params: vec![],
+                private: false,
+                confirm: Some("Ship release artifacts? [y/N]".to_string()),
+                shell_override: None,
+                requires: vec![],
+            },
+        );
+        let config = BroskiFile {
+            broski: BroskiSection { version: "0.5".into() },
+            task: tasks,
+            alias: Default::default(),
+            load_env: vec![],
+        };
+        assert!(
+            target_has_interactive_task(&config, "release"),
+            "a graph-mode task with @confirm must run with the terminal suspended, \
+             not under raw mode where read_line() never sees a \\n"
+        );
     }
 
     #[test]
