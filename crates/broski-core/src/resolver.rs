@@ -11,59 +11,29 @@ pub fn resolve_inputs(workspace_root: &Path, patterns: &[String]) -> Result<Vec<
         validate_pattern(pattern)?;
 
         if looks_like_glob(pattern) {
+            let matcher = glob::Pattern::new(pattern)
+                .with_context(|| format!("invalid input glob '{}'", pattern))?;
+            let mut builder = WalkBuilder::new(workspace_root);
+            builder.git_ignore(true).git_exclude(true).git_global(true).require_git(false);
+            let walker = builder.build();
             let mut found = false;
-            if pattern.contains("**") {
-                let matcher = glob::Pattern::new(pattern)
-                    .with_context(|| format!("invalid input glob '{}'", pattern))?;
-                let mut builder = WalkBuilder::new(workspace_root);
-                builder.git_ignore(true).git_exclude(true).git_global(true);
-                let walker = builder.build();
-                for entry in walker {
-                    let entry =
-                        entry.with_context(|| format!("expanding input glob '{}'", pattern))?;
-                    let path = entry.path();
-                    if path == workspace_root {
-                        continue;
-                    }
-                    let rel = path
-                        .strip_prefix(workspace_root)
-                        .with_context(|| {
-                            format!(
-                                "input path '{}' escaped workspace root '{}'",
-                                path.display(),
-                                workspace_root.display()
-                            )
-                        })?
-                        .to_path_buf();
-                    if matcher.matches_path(&rel) {
-                        resolved.insert(rel);
-                        found = true;
-                    }
+            for entry in walker {
+                let entry = entry.with_context(|| format!("expanding input glob '{}'", pattern))?;
+                let path = entry.path();
+                if path == workspace_root {
+                    continue;
                 }
-            } else {
-                let absolute_pattern = workspace_root.join(pattern);
-                let pattern_text = absolute_pattern
-                    .to_str()
-                    .ok_or_else(|| anyhow!("non UTF-8 input pattern '{}'", pattern))?;
-                for entry in glob::glob(pattern_text)
-                    .with_context(|| format!("resolving input glob '{}'", pattern))?
-                {
-                    let path =
-                        entry.with_context(|| format!("expanding input glob '{}'", pattern))?;
-                    if !path.exists() {
-                        continue;
-                    }
-
-                    let rel = path
-                        .strip_prefix(workspace_root)
-                        .with_context(|| {
-                            format!(
-                                "input path '{}' escaped workspace root '{}'",
-                                path.display(),
-                                workspace_root.display()
-                            )
-                        })?
-                        .to_path_buf();
+                let rel = path
+                    .strip_prefix(workspace_root)
+                    .with_context(|| {
+                        format!(
+                            "input path '{}' escaped workspace root '{}'",
+                            path.display(),
+                            workspace_root.display()
+                        )
+                    })?
+                    .to_path_buf();
+                if matcher.matches_path(&rel) {
                     resolved.insert(rel);
                     found = true;
                 }
@@ -169,5 +139,25 @@ mod tests {
         let resolved = resolve_inputs(workspace, &patterns).expect("resolve glob inputs");
 
         assert_eq!(resolved, vec![PathBuf::from("src/a.rs"), PathBuf::from("src/nested/b.rs")]);
+    }
+
+    #[test]
+    fn single_star_glob_respects_gitignore_like_double_star() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let workspace = tmp.path();
+
+        fs::create_dir_all(workspace.join("gen")).expect("create gen dir");
+        fs::write(workspace.join(".gitignore"), "gen/ignored.rs\n").expect("write .gitignore");
+        fs::write(workspace.join("gen/kept.rs"), "fn kept() {}\n").expect("write gen/kept.rs");
+        fs::write(workspace.join("gen/ignored.rs"), "fn ignored() {}\n")
+            .expect("write gen/ignored.rs");
+
+        let single_star =
+            resolve_inputs(workspace, &["gen/*.rs".to_string()]).expect("resolve single-star glob");
+        let double_star = resolve_inputs(workspace, &["gen/**/*.rs".to_string()])
+            .expect("resolve double-star glob");
+
+        assert_eq!(single_star, vec![PathBuf::from("gen/kept.rs")]);
+        assert_eq!(single_star, double_star);
     }
 }
