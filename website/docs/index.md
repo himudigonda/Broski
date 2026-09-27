@@ -24,7 +24,7 @@ slug: /
 
 ## Current Versioning
 
-- **Current:** `v0.7.1` — see [Release Notes](releases)
+- **Current:** `v0.7.2` — see [Release Notes](releases)
 
 ## Learn More (after quickstart)
 

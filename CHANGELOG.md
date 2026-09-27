@@ -2,6 +2,77 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.2] - 2026-09-27
+
+A correctness and hardening release covering the cache, executor, resolver, and TUI. No CLI flags, DSL syntax, or
+on-disk cache format changed.
+
+### Fixed — Cache Correctness
+- Directory fingerprinting used unframed concatenation of child hashes, so two directory trees with different file
+  layouts could hash identically; entries are now length-prefixed before hashing.
+- The directory walk used for fingerprinting did not follow symlinks, so a symlinked file's changes were invisible
+  to the cache; it now follows links and classifies entries by their resolved type.
+- File permission bits were not part of the fingerprint, so a task with `chmod` in its script could still hit
+  cache; POSIX mode bits are now hashed in on Unix.
+- `prune()` skipped file-kind (non-directory) cache objects when computing size and safety checks, undercounting
+  reclaimable space and leaving some entries unprotected; it now handles both file and directory objects.
+- `prune()` could remove objects still referenced by run history; it now cross-references history before deleting.
+- `store_artifacts` wrote directly into the final object path, so a crash mid-write left a corrupt object behind;
+  it now stages into a temp directory and renames atomically.
+- `restore_artifacts` did not verify restored content against its recorded hash, so a corrupted cache object would
+  silently populate a workspace; it now re-hashes and rejects a mismatch.
+- SQLite queries used to build cache-explain history reasoning were not resilient to concurrent writers; a
+  `busy_timeout` is now set on every connection.
+
+### Fixed — Security and Isolation
+- `promote_outputs` did not reject a task output that was a symlink pointing outside the workspace; it now walks
+  promoted output trees and refuses any symlink.
+- Directly invoking a `@private` task by name bypassed the intent of the annotation; `run_target_once` now rejects
+  direct invocation of `@private` tasks.
+- `SecretRedactor` excluded short secret values from redaction, so a short `@secret_env` value could leak into logs
+  unredacted; the length floor was removed.
+- Live log capture (`spawn_log_capture`) did not redact secrets line-by-line as output streamed, only after the
+  fact; redaction is now applied to each line as it is captured.
+- Cross-task `@out` collisions (two tasks declaring the same or overlapping output path) were undetected until a
+  promotion clobbered one task's output with another's; the validator now checks for exact and path-prefix
+  overlaps across all declared outputs before a run starts.
+
+### Fixed — Parsing and Resolution
+- `*` and `**` globs in `@in`/`@out` were resolved through two different code paths with different gitignore
+  behavior; both now resolve through the same `ignore`-crate walk.
+- Task command splitting used a naive whitespace split, breaking on quoted arguments; it now uses `shell_words`
+  for quote-aware tokenization.
+- `@secret_env`/`@env_inherit` accepted invalid environment variable names without validation; both are now
+  checked against POSIX identifier rules.
+
+### Fixed — TUI
+- The DAG pane's row-selection index did not account for inline "cache miss reason" rows, so selection could land
+  on the wrong task once a reason row was present; `visible_index` now accounts for them.
+- A hard-cancel (second Ctrl-C) could leave the terminal in raw mode if the process panicked before its `Drop`
+  guard ran restore — `panic = "abort"` in the release profile means `Drop` never runs on panic. A
+  `std::panic::set_hook` now restores the terminal in both panic modes.
+- An unexpected executor-side disconnect (e.g. a panicked worker thread) left the dashboard frozen at "running"
+  instead of reporting a terminal state.
+- Launcher tab-completion overwrote already-typed arguments instead of completing only the current token.
+- Launcher cursor selection was positional, so refreshing the task list while scrolled could silently select a
+  different task; selection now tracks task identity across refreshes.
+- The `--theme auto` OSC 11 background probe had no timeout, so a terminal that never responds to the query could
+  wedge startup indefinitely; the probe now runs on a background thread with a 500ms bound and falls back to
+  `default`.
+- `@confirm` tasks in graph/dashboard mode did not suspend the terminal for interactive input the way launcher
+  mode did; TUI detection of interactive tasks now covers `@confirm` in both modes.
+- `/cache prune` invoked from the launcher did not hold the runtime lock, allowing it to race a concurrent run.
+
+### Changed
+- `broski doctor`'s default repair behavior was reviewed against its documented contract and left unchanged.
+
+### Known Limitations
+- `CancellationToken`'s hard-cancel path has a narrow PID-reuse race on Unix: if a process exits and the OS
+  reuses its PID before the cancellation signal is delivered, the signal could in theory reach an unrelated
+  process. Not fixed in this release — closing it correctly needs either `pidfd` (Linux-only) or a broader
+  ownership-model change, and the real-world window is small.
+- The equivalent PID-reuse guard for the runtime lock is not implemented on macOS or Windows.
+
 ## [0.7.1] - 2026-06-30
 
 ### Fixed — Multi-Line Task Bodies Did Not Fail Fast
