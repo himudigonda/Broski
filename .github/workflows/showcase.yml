@@ -1,0 +1,54 @@
+name: Showcase (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  showcase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          command -v bwrap
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: examples/showcase/frontend/package-lock.json
+
+      - name: Build Broski CLI
+        run: cargo build -p broski-cli
+
+      - name: Build showcase UI and API
+        run: |
+          cd examples/showcase
+          ../../target/debug/broski --workspace . run build_ui --explain
+          ../../target/debug/broski --workspace . run build_api --explain
+
+      - name: Validate showcase health endpoint
+        run: |
+          cd examples/showcase
+          PORT=18080 STATIC_DIR=frontend/dist backend/target/release/showcase-server >/tmp/showcase.log 2>&1 &
+          SHOWCASE_PID=$!
+          trap 'kill ${SHOWCASE_PID} >/dev/null 2>&1 || true' EXIT
+          sleep 2
+          curl -fsS http://127.0.0.1:18080/api/health
+
+      - name: Build showcase container artifact
+        run: |
+          cd examples/showcase
+          ../../target/debug/broski --workspace . run package_container --explain
+          test -f artifacts/showcase-image.tar
